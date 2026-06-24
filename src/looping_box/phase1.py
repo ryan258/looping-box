@@ -328,8 +328,9 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _rel(root: Path, path: Path) -> str:
-    # Paths are containment-checked in _resolve_under_root, so this is always
-    # under root; relpath just gives a stable posix-style relative string.
+    # Callers pass containment-checked paths (config via _resolve_under_root,
+    # discovered files via _iter_input_files), so this is always under root;
+    # relpath just gives a stable posix-style relative string.
     return Path(os.path.relpath(path, root)).as_posix()
 
 
