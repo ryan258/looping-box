@@ -7,8 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from looping_box.action_policy import classify_action
 from looping_box.phase1 import run_phase1
-from looping_box.review import classify_action, list_reviews, record_review
+from looping_box.review import list_reviews, record_review
 from looping_box.schema import validate
 
 SCHEMA_DIR = ROOT / "docs" / "schemas"

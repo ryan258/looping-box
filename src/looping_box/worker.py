@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import model
 from .phase1 import (
     DELTA_SCHEMA,
     _rel,
@@ -120,6 +121,19 @@ def _run_context_builder(
         "items": items,
         "blocked_inputs": blocked_inputs,
     }
+    # Dry run must have no side effects: a model call costs money and ships file
+    # excerpts to OpenRouter, so it is gated behind `not dry_run`.
+    if items and not dry_run:
+        prompt = "Summarize these routed inputs into a short context briefing:\n\n" + "\n".join(
+            f"- {item['relative_path']}: {item['excerpt']}" for item in items
+        )
+        completion = _try_model("context_builder", prompt, root_path)
+        if completion is not None:
+            context["synthesis"] = {
+                "text": completion["text"],
+                "model": completion["model"],
+                "response_sha256": completion["response_sha256"],
+            }
     artifacts = [_rel(root_path, context_path), _rel(root_path, markdown_path)]
     output = _worker_output(
         "context_builder",
@@ -166,7 +180,16 @@ def _run_execution_engine(
         return output
 
     context_hash = _sha256_file(context_path)
-    if state.get("last_context_sha256") == context_hash:
+    # Load .env before reading the role's model, or a freshly configured model
+    # would be missed and the run would wrongly report idle.
+    model.load_env(root_path)
+    model_id = model.model_for("execution_engine")
+    # Idempotency is keyed on (context hash + model id): swapping the model in
+    # .env re-runs even when the context is unchanged.
+    if (
+        state.get("last_context_sha256") == context_hash
+        and state.get("last_model") == model_id
+    ):
         output = _worker_output("execution_engine", generated_at, "idle", [], [], [])
         _persist_worker_output(root_path, output_dir, output, dry_run)
         return output
@@ -192,14 +215,7 @@ def _run_execution_engine(
         "generated_at": generated_at,
         "source_context": _rel(root_path, context_path),
         "source_context_sha256": context_hash,
-        "items": [
-            {
-                "relative_path": item.get("relative_path", ""),
-                "matched_routes": list(item.get("matched_routes", [])),
-                "draft": item.get("excerpt", ""),
-            }
-            for item in context.get("items", [])
-        ],
+        "items": [_draft_item(root_path, item, dry_run) for item in context.get("items", [])],
     }
     artifacts = [_rel(root_path, draft_path), _rel(root_path, draft_markdown_path)]
     output = _worker_output(
@@ -215,10 +231,48 @@ def _run_execution_engine(
         _write_json(draft_path, draft)
         draft_markdown_path.write_text(_draft_markdown(draft), encoding="utf-8")
         state["last_context_sha256"] = context_hash
+        state["last_model"] = model_id
         state["last_run_at"] = generated_at
         _write_json(state_path, state)
     _persist_worker_output(root_path, output_dir, output, dry_run)
     return output
+
+
+def _draft_item(root: Path, item: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+    """Draft one context item. Uses the execution_engine model when configured,
+    otherwise falls back to the item excerpt (deterministic, offline). A model
+    call is skipped entirely during a dry run (no network, no spend)."""
+    drafted = {
+        "relative_path": item.get("relative_path", ""),
+        "matched_routes": list(item.get("matched_routes", [])),
+        "draft": item.get("excerpt", ""),
+    }
+    if dry_run:
+        return drafted
+    prompt = (
+        "Draft a short, local working note for this routed input. "
+        f"Routes: {', '.join(item.get('matched_routes', [])) or 'none'}.\n\n"
+        f"{item.get('excerpt', '')}"
+    )
+    completion = _try_model("execution_engine", prompt, root)
+    if completion is not None:
+        drafted["draft"] = completion["text"]
+        drafted["model"] = completion["model"]
+        drafted["response_sha256"] = completion["response_sha256"]
+    return drafted
+
+
+def _try_model(role: str, prompt: str, root: Path) -> dict[str, Any] | None:
+    """Call the role's model if configured, degrading to deterministic output
+    (return None) on any model/network/provider error. Used only for the worker
+    enhancement paths where the deterministic fallback is acceptable; the review
+    verifier fails closed instead."""
+    try:
+        return model.generate_if_enabled(role, prompt, root=root)
+    except Exception:
+        # ponytail: a transient OpenRouter failure must not crash a worker pass;
+        # fall back to the deterministic excerpt rather than fail the pipeline.
+        return None
 
 
 def _worker_output(

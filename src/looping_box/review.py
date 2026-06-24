@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-from .action_policy import classify_action
+from . import model
 from .phase1 import _rel, _resolve_under_root, _sha256_file, _utc_now, _write_json
 
 
@@ -103,6 +104,9 @@ def run_verifier(root: Path | str, review_id: str, *, now: str | None = None) ->
             "source items include hashes",
         ),
     ]
+    model_check = _model_review_check(root_path, payload)
+    if model_check is not None:
+        checks.append(model_check)
     status = "passed" if all(check["status"] == "passed" for check in checks) else "failed"
     result = {
         "schema": VERIFIER_RESULT_SCHEMA,
@@ -115,6 +119,34 @@ def run_verifier(root: Path | str, review_id: str, *, now: str | None = None) ->
     _write_json(result_path, result)
     result["path"] = _rel(root_path, result_path)
     return result
+
+
+def _model_review_check(root: Path, payload: dict[str, Any]) -> dict[str, str] | None:
+    """Optional model-as-judge check. Deterministic checks above stay required;
+    this only runs when MODEL_VERIFIER is configured, and can only add a failure.
+    """
+    reasons = ", ".join(payload.get("risk_reasons", [])) or "unspecified"
+    excerpts = "\n".join(item.get("excerpt", "") for item in payload.get("source_items", []))
+    prompt = (
+        "You are a cautious safety reviewer for a local automation system. "
+        "Reply 'PASS' only if recording an approval for this staged item is clearly safe, "
+        "otherwise reply 'FAIL: <reason>'.\n"
+        f"Risk reasons: {reasons}\nSource excerpt:\n{excerpts}"
+    )
+    if not model.is_enabled("verifier", root=root):
+        return None
+    try:
+        completion = model.complete("verifier", prompt, root=root)
+    except Exception as exc:
+        # Fail closed: a model verifier that errors must not let an approval
+        # through. Route to a failed check so the operator triages it.
+        return _check("model_review", False, f"model verifier error: {str(exc)[:160]}")
+    passed = completion["text"].strip().upper().startswith("PASS")
+    return _check(
+        "model_review",
+        passed,
+        f"{completion['model']}: {completion['text'].strip()[:200]}",
+    )
 
 
 def _check(name: str, passed: bool, message: str) -> dict[str, str]:
@@ -225,7 +257,12 @@ def main() -> int:
     if args.command == "show":
         print(json.dumps(show_review(args.root, args.review_id), indent=2, sort_keys=True))
         return 0
-    record = record_review(args.root, args.review_id, decision_commands[args.command], note=args.note)
+    try:
+        record = record_review(args.root, args.review_id, decision_commands[args.command], note=args.note)
+    except ValueError as exc:
+        # Expected: unknown id, or a verifier (incl. model judge) that refused.
+        print(f"declined: {exc}", file=sys.stderr)
+        return 1
     print(f"{record['decision']}: {record['review_id']}")
     return 0
 
