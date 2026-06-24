@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,8 +53,8 @@ def run_phase1(
     review_items: list[dict[str, Any]] = []
     all_review_reasons: list[str] = []
 
-    for file_path in _iter_input_files(resolved_input_dir, allowed_extensions):
-        relative_path = file_path.relative_to(root_path).as_posix()
+    for file_path in _iter_input_files(resolved_input_dir, root_path, allowed_extensions):
+        relative_path = _rel(root_path, file_path)
         content_hash = _sha256_file(file_path)
         file_stat = file_path.stat()
 
@@ -90,6 +91,10 @@ def run_phase1(
             for reason in review_reasons:
                 if reason not in all_review_reasons:
                     all_review_reasons.append(reason)
+            # Pending-review files are NOT recorded as processed: a file that
+            # trips the boundary gate keeps re-surfacing (and regenerates the
+            # staging payload) every run until a human handles/removes it.
+            continue
 
         _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
 
@@ -102,19 +107,19 @@ def run_phase1(
         review_items,
     )
 
-    run_id = _run_id(generated_at)
+    run_id = _unique_run_id(resolved_delta_dir, _run_id(generated_at))
     delta = {
         "schema": DELTA_SCHEMA,
         "run_id": run_id,
         "generated_at": generated_at,
         "sop": {
-            "path": resolved_sop_path.relative_to(root_path).as_posix(),
+            "path": _rel(root_path, resolved_sop_path),
             "sha256": _sha256_file(resolved_sop_path),
             "name": sop.get("name", "unnamed"),
         },
         "inputs": {
             "root": str(root_path),
-            "input_dir": resolved_input_dir.relative_to(root_path).as_posix(),
+            "input_dir": _rel(root_path, resolved_input_dir),
         },
         "summary": {
             "scanned": len(changes) + len(skipped),
@@ -128,7 +133,7 @@ def run_phase1(
     }
 
     delta_path = resolved_delta_dir / f"{run_id}.json"
-    delta["delta_path"] = delta_path.relative_to(root_path).as_posix()
+    delta["delta_path"] = _rel(root_path, delta_path)
     _write_json(delta_path, delta)
 
     _record_run(state, generated_at, delta["delta_path"], delta["summary"])
@@ -139,9 +144,12 @@ def run_phase1(
 
 def _resolve_under_root(root: Path, value: Path | str) -> Path:
     path = Path(value)
-    if path.is_absolute():
-        return path
-    return root / path
+    candidate = (path if path.is_absolute() else root / path).resolve()
+    # The repo boundary is part of the safety model: refuse to read or write
+    # outside root (incl. via absolute paths or `..` traversal). Fail closed.
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(f"path escapes project root: {value!r} -> {candidate}")
+    return candidate
 
 
 def _ensure_layout(*directories: Path) -> None:
@@ -170,7 +178,9 @@ def _read_state(path: Path) -> dict[str, Any]:
     return state
 
 
-def _iter_input_files(input_dir: Path, allowed_extensions: set[str]) -> list[Path]:
+def _iter_input_files(
+    input_dir: Path, root: Path, allowed_extensions: set[str]
+) -> list[Path]:
     if not input_dir.exists():
         return []
 
@@ -181,6 +191,12 @@ def _iter_input_files(input_dir: Path, allowed_extensions: set[str]) -> list[Pat
         if any(part.startswith(".") for part in path.relative_to(input_dir).parts):
             continue
         if path.suffix.lower() not in allowed_extensions:
+            continue
+        # is_file()/read/hash all follow symlinks, so a symlink inside the input
+        # dir can point outside the repo. Skip any file whose real target escapes
+        # the boundary. Fail-closed, consistent with _resolve_under_root.
+        real = path.resolve()
+        if real != root and root not in real.parents:
             continue
         files.append(path)
     return sorted(files)
@@ -213,13 +229,16 @@ def _record_processed(
         "size_bytes": size_bytes,
         "processed_at": processed_at,
     }
-    state["processed_hashes"].setdefault(
-        content_hash,
-        {
-            "first_seen_path": relative_path,
-            "first_seen_at": processed_at,
-        },
-    )
+    # Cross-path dedup is by content hash, but empty files all share one hash —
+    # don't register it, or only the first empty file would ever be ingested.
+    if size_bytes > 0:
+        state["processed_hashes"].setdefault(
+            content_hash,
+            {
+                "first_seen_path": relative_path,
+                "first_seen_at": processed_at,
+            },
+        )
 
 
 def _record_run(
@@ -243,8 +262,9 @@ def _record_run(
 def _match_routes(text: str, routes: list[dict[str, Any]]) -> list[str]:
     matches: list[str] = []
     for route in routes:
-        if _match_keywords(text, route.get("keywords", [])):
-            matches.append(str(route["label"]))
+        label = route.get("label")
+        if label and _match_keywords(text, route.get("keywords", [])):
+            matches.append(str(label))
     return matches
 
 
@@ -295,7 +315,7 @@ def _build_boundary_gate(
 
     return {
         "status": "pending_review",
-        "payload": payload_path.relative_to(root).as_posix(),
+        "payload": _rel(root, payload_path),
         "reasons": reasons,
     }
 
@@ -307,8 +327,23 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _rel(root: Path, path: Path) -> str:
+    # Paths are containment-checked in _resolve_under_root, so this is always
+    # under root; relpath just gives a stable posix-style relative string.
+    return Path(os.path.relpath(path, root)).as_posix()
+
+
 def _run_id(generated_at: str) -> str:
     return "phase1-delta-" + "".join(character for character in generated_at if character.isalnum())
+
+
+def _unique_run_id(delta_dir: Path, base: str) -> str:
+    run_id = base
+    suffix = 2
+    while (delta_dir / f"{run_id}.json").exists():
+        run_id = f"{base}-{suffix}"
+        suffix += 1
+    return run_id
 
 
 def _utc_now() -> str:

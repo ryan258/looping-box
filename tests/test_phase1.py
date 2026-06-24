@@ -89,6 +89,51 @@ class Phase1IngestionTests(unittest.TestCase):
         self.assertEqual(payload["reasons"], ["deploy", "send"])
         self.assertEqual(payload["items"][0]["relative_path"], "inbox/release.txt")
 
+    def test_review_files_resurface_until_handled(self):
+        (self.root / "inbox" / "release.txt").write_text(
+            "Please deploy this change.",
+            encoding="utf-8",
+        )
+
+        run_phase1(self.root, now="2026-06-24T12:00:00Z")
+        result = run_phase1(self.root, now="2026-06-24T12:01:00Z")
+
+        # Not marked processed, so it re-surfaces instead of being skipped.
+        self.assertEqual(result["summary"]["changed"], 1)
+        self.assertEqual(result["summary"]["skipped"], 0)
+        self.assertEqual(result["boundary_gate"]["status"], "pending_review")
+        self.assertTrue((self.root / "staging" / "pending_review.json").exists())
+
+    def test_distinct_empty_files_are_each_processed(self):
+        (self.root / "inbox" / "a.md").write_text("", encoding="utf-8")
+        (self.root / "inbox" / "b.md").write_text("", encoding="utf-8")
+
+        result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+        # Identical (empty) content must not dedup distinct files away.
+        self.assertEqual(result["summary"]["changed"], 2)
+
+    def test_input_outside_root_is_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / "leak.md").write_text("secret", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                run_phase1(self.root, now="2026-06-24T12:00:00Z", input_dir=outside)
+
+    def test_dotdot_traversal_is_rejected(self):
+        with self.assertRaises(ValueError):
+            run_phase1(self.root, now="2026-06-24T12:00:00Z", input_dir="../escape")
+
+    def test_symlink_escaping_root_is_not_ingested(self):
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / "outside.md"
+            target.write_text("secret outside content", encoding="utf-8")
+            (self.root / "inbox" / "link.md").symlink_to(target)
+
+            result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+            self.assertEqual(result["summary"]["changed"], 0)
+            self.assertEqual(result["changes"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
