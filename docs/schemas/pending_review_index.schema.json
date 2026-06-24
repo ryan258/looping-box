@@ -1,0 +1,11 @@
+{
+  "title": "looping-box.pending-review-index.v1",
+  "type": "object",
+  "required": ["schema", "generated_at", "latest", "reviews"],
+  "properties": {
+    "schema": {"const": "looping-box.pending-review-index.v1"},
+    "generated_at": {"type": "string"},
+    "latest": {"type": "string"},
+    "reviews": {"type": "array", "items": {"type": "string"}}
+  }
+}

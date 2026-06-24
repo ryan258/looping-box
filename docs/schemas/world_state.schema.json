@@ -1,0 +1,50 @@
+{
+  "title": "looping-box.world-state.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "registered_loops",
+    "worker_states",
+    "observed_deltas",
+    "dirty",
+    "dependencies",
+    "recovery",
+    "runs",
+    "leases"
+  ],
+  "properties": {
+    "schema": {"const": "looping-box.world-state.v1"},
+    "registered_loops": {"type": "array", "items": {"type": "string"}},
+    "worker_states": {"type": "object"},
+    "observed_deltas": {"type": "array", "items": {"type": "string"}},
+    "dirty": {"type": "boolean"},
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": {"type": "string"},
+          "to": {"type": "string"}
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "required": [
+        "last_error",
+        "blocked_reason",
+        "pending_review_payload",
+        "operator_action_required"
+      ],
+      "properties": {
+        "last_error": {"type": ["string", "null"]},
+        "blocked_reason": {"type": ["string", "null"]},
+        "pending_review_payload": {"type": ["string", "null"]},
+        "operator_action_required": {"type": "boolean"}
+      }
+    },
+    "runs": {"type": "array"},
+    "leases": {"type": "object"}
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "title": "looping-box.action-classes.v1",
+  "type": "object",
+  "required": ["schema", "default_class", "classes"],
+  "properties": {
+    "schema": {"const": "looping-box.action-classes.v1"},
+    "default_class": {"enum": ["review_required", "blocked", "forbidden"]},
+    "classes": {"type": "object"}
+  }
+}

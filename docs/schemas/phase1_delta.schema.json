@@ -1,0 +1,92 @@
+{
+  "title": "looping-box.phase1.delta.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "run_id",
+    "generated_at",
+    "sop",
+    "inputs",
+    "summary",
+    "changes",
+    "skipped",
+    "boundary_gate",
+    "delta_path"
+  ],
+  "properties": {
+    "schema": {"const": "looping-box.phase1.delta.v1"},
+    "run_id": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "delta_path": {"type": "string"},
+    "sop": {
+      "type": "object",
+      "required": ["path", "sha256", "name"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string"},
+        "name": {"type": "string"}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["root", "input_dir"],
+      "properties": {
+        "root": {"type": "string"},
+        "input_dir": {"type": "string"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["scanned", "changed", "skipped", "requires_review"],
+      "properties": {
+        "scanned": {"type": "integer"},
+        "changed": {"type": "integer"},
+        "skipped": {"type": "integer"},
+        "requires_review": {"type": "boolean"}
+      }
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "relative_path",
+          "sha256",
+          "size_bytes",
+          "matched_routes",
+          "review_reasons",
+          "excerpt"
+        ],
+        "properties": {
+          "relative_path": {"type": "string"},
+          "sha256": {"type": "string"},
+          "size_bytes": {"type": "integer"},
+          "matched_routes": {"type": "array", "items": {"type": "string"}},
+          "review_reasons": {"type": "array", "items": {"type": "string"}},
+          "excerpt": {"type": "string"}
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relative_path", "sha256", "reason"],
+        "properties": {
+          "relative_path": {"type": "string"},
+          "sha256": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "boundary_gate": {
+      "type": "object",
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {"enum": ["clear", "pending_review"]},
+        "payload": {"type": ["string", "null"]},
+        "reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

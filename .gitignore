@@ -1,8 +1,18 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.looping_box.lock
+.world_state.json
 
 cache/deltas/*.json
 cache/state/*.json
+cache/supervisor/*.json
+cache/verifiers/*.json
+cache/workers/**/*.json
+cache/workers/**/*.md
+logs/transactions/*.jsonl
 staging/pending_review.json
-
+staging/approvals/*.json
+staging/rejections/*.json
+staging/reviews/*.json
+staging/archive/*.json

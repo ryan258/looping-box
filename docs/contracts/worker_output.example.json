@@ -1,0 +1,18 @@
+{
+  "schema": "looping-box.worker.output.v1",
+  "worker_id": "context_builder",
+  "run_id": "worker-context-builder-20260624T120000Z",
+  "generated_at": "2026-06-24T12:00:00Z",
+  "status": "complete",
+  "inputs": {
+    "source_deltas": [
+      "cache/deltas/phase1-delta-20260624T120000Z.json"
+    ]
+  },
+  "outputs": {
+    "artifacts": [
+      "cache/workers/context_builder/context_package.json"
+    ]
+  },
+  "errors": []
+}

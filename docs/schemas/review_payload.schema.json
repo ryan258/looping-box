@@ -1,0 +1,59 @@
+{
+  "title": "looping-box.review-payload.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "review_id",
+    "generated_at",
+    "source",
+    "notification_message",
+    "action_class",
+    "risk_reasons",
+    "source_items",
+    "generated_artifacts",
+    "verifier",
+    "suggested_verification"
+  ],
+  "properties": {
+    "schema": {"const": "looping-box.review-payload.v1"},
+    "review_id": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "source": {"type": "string"},
+    "notification_message": {"type": "string"},
+    "action_class": {"enum": ["safe_local_transform", "review_required", "blocked", "forbidden"]},
+    "risk_reasons": {"type": "array", "items": {"type": "string"}},
+    "source_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "relative_path",
+          "sha256",
+          "size_bytes",
+          "matched_routes",
+          "review_reasons",
+          "excerpt"
+        ],
+        "properties": {
+          "relative_path": {"type": "string"},
+          "sha256": {"type": "string"},
+          "size_bytes": {"type": "integer"},
+          "matched_routes": {"type": "array", "items": {"type": "string"}},
+          "review_reasons": {"type": "array", "items": {"type": "string"}},
+          "excerpt": {"type": "string"}
+        }
+      }
+    },
+    "generated_artifacts": {"type": "array", "items": {"type": "string"}},
+    "verifier": {
+      "type": "object",
+      "required": ["required", "status", "result"],
+      "properties": {
+        "required": {"type": "boolean"},
+        "status": {"enum": ["pending", "passed", "failed", "not_applicable"]},
+        "result": {"type": ["string", "null"]}
+      }
+    },
+    "suggested_verification": {"type": "array", "items": {"type": "string"}}
+  }
+}

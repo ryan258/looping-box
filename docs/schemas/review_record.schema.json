@@ -1,0 +1,22 @@
+{
+  "title": "looping-box.review-record.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "review_id",
+    "generated_at",
+    "decision",
+    "note",
+    "payload_sha256",
+    "verifier_result"
+  ],
+  "properties": {
+    "schema": {"const": "looping-box.review-record.v1"},
+    "review_id": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "decision": {"enum": ["approved", "rejected"]},
+    "note": {"type": "string"},
+    "payload_sha256": {"type": "string"},
+    "verifier_result": {"type": ["string", "null"]}
+  }
+}

@@ -25,6 +25,4 @@ forever. Fine for a local Phase 1 inbox; flag it before this scales.
 
 ## Nits
 
-- `change["mtime_ns"]` is recorded but never consumed; dedup is content-only.
-  Drop it or use it.
 - `_read_json` raises on a malformed SOP. Failing loud is intended; left as-is.

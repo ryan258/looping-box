@@ -7,7 +7,10 @@ Runtime outputs are ignored by git:
 
 - `cache/state/phase1_state.json`
 - `cache/deltas/*.json`
+- `cache/workers/**/*.json`
+- `cache/verifiers/*.json`
 - `staging/pending_review.json`
+- `staging/reviews/*.json`
 
 Use this helper after any run to inspect the newest delta:
 
@@ -21,7 +24,10 @@ To reset all demo runtime state:
 ```sh
 find inbox -maxdepth 1 -type f -name 'demo-*' -delete
 find cache/deltas -maxdepth 1 -type f -name '*.json' -delete
-rm -f cache/state/phase1_state.json staging/pending_review.json
+find cache/workers -type f \( -name '*.json' -o -name '*.md' \) -delete
+find cache/verifiers -maxdepth 1 -type f -name '*.json' -delete
+find staging/reviews -maxdepth 1 -type f -name '*.json' -delete
+rm -f cache/state/phase1_state.json staging/pending_review.json .world_state.json
 ```
 
 ## Demo 1: Run an Empty Inbox Pass
@@ -36,7 +42,10 @@ Steps:
    ```sh
    find inbox -maxdepth 1 -type f -name 'demo-*' -delete
    find cache/deltas -maxdepth 1 -type f -name '*.json' -delete
-   rm -f cache/state/phase1_state.json staging/pending_review.json
+   find cache/workers -type f \( -name '*.json' -o -name '*.md' \) -delete
+   find cache/verifiers -maxdepth 1 -type f -name '*.json' -delete
+   find staging/reviews -maxdepth 1 -type f -name '*.json' -delete
+   rm -f cache/state/phase1_state.json staging/pending_review.json .world_state.json
    ```
 
 2. Run the loop:
@@ -207,7 +216,10 @@ Steps:
    ```sh
    find inbox -maxdepth 1 -type f -name 'demo-*' -delete
    find cache/deltas -maxdepth 1 -type f -name '*.json' -delete
-   rm -f cache/state/phase1_state.json staging/pending_review.json
+   find cache/workers -type f \( -name '*.json' -o -name '*.md' \) -delete
+   find cache/verifiers -maxdepth 1 -type f -name '*.json' -delete
+   find staging/reviews -maxdepth 1 -type f -name '*.json' -delete
+   rm -f cache/state/phase1_state.json staging/pending_review.json .world_state.json
    ```
 
 2. Create one input:
@@ -281,10 +293,12 @@ Steps:
    ./startday.sh
    ```
 
-3. Inspect the staged review payload:
+3. Inspect the pending review index and latest payload:
 
    ```sh
    python3 -m json.tool staging/pending_review.json
+   latest_review="$(python3 -c 'import json; print(json.load(open("staging/pending_review.json"))["latest"])')"
+   python3 -m json.tool "$latest_review"
    ```
 
 4. Inspect the newest delta:
@@ -295,5 +309,6 @@ Steps:
    ```
 
 Expected result: the terminal prints `review=pending_review`, the delta
-boundary gate status is `pending_review`, and `staging/pending_review.json`
-lists reasons such as `deploy`, `production`, `send`, and `email`.
+boundary gate status is `pending_review`, `staging/pending_review.json` points
+to a review payload under `staging/reviews/`, and that payload lists reasons
+such as `deploy`, `production`, `send`, and `email`.

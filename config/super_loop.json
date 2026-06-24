@@ -1,0 +1,15 @@
+{
+  "schema": "looping-box.super-loop.config.v1",
+  "max_files_per_cycle": 20,
+  "max_payload_bytes": 65536,
+  "max_worker_runtime_seconds": 30,
+  "stale_lock_seconds": 300,
+  "workers": [
+    "context_builder",
+    "execution_engine"
+  ],
+  "dependencies": [
+    {"from": "phase1_delta", "to": "context_builder"},
+    {"from": "context_builder", "to": "execution_engine"}
+  ]
+}

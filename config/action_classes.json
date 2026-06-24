@@ -1,0 +1,29 @@
+{
+  "schema": "looping-box.action-classes.v1",
+  "default_class": "review_required",
+  "classes": {
+    "safe_local_transform": [
+      "docs",
+      "format",
+      "summarize"
+    ],
+    "review_required": [
+      "commit",
+      "push",
+      "deploy",
+      "publish",
+      "send",
+      "email",
+      "execute",
+      "run script",
+      "delete",
+      "remove"
+    ],
+    "blocked": [
+      "credential",
+      "secret",
+      "production"
+    ],
+    "forbidden": []
+  }
+}

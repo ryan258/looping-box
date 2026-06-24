@@ -1,0 +1,64 @@
+# Operator Recovery: Clearing the Boundary Gate
+
+When an inbox file contains outward-action language such as `deploy`, `commit`,
+or `send`, Phase 1 trips the boundary gate:
+
+- It writes a unique payload under `staging/reviews/`.
+- It updates `staging/pending_review.json`, a stable index of pending payloads.
+- The run reports `review=pending_review`.
+- The triggering file is not marked processed, so it re-surfaces until handled.
+
+Deleting `staging/pending_review.json` alone does not resume the loop. The next
+run rebuilds the index from the same inbox file.
+
+## Inspect Pending Reviews
+
+```sh
+PYTHONPATH=src python3 -m looping_box.review list
+PYTHONPATH=src python3 -m looping_box.review show <review_id>
+```
+
+Approving or rejecting records the operator decision for that exact source path,
+content hash, and review reason set. It does not execute the requested action.
+
+```sh
+PYTHONPATH=src python3 -m looping_box.review approve <review_id> --note "handled manually"
+PYTHONPATH=src python3 -m looping_box.review reject <review_id> --note "not allowed"
+```
+
+Approvals run deterministic verifier checks and write `cache/verifiers/<id>.json`.
+
+## Resume Ingestion
+
+After recording the decision, rerun ingestion. The unchanged reviewed source item
+is recorded as handled and will not recreate a pending review:
+
+```sh
+./startday.sh
+```
+
+You may also handle the source file listed in the review payload:
+
+1. Approve and remove: you handled the request manually. Move or delete the
+   source file from `inbox/`.
+2. Defuse and re-ingest: edit the source file to remove the triggering language.
+3. Reject: remove the source file from `inbox/`.
+
+Archive or remove stale staging index files if you do not need them for audit:
+
+```sh
+mkdir -p staging/archive
+mv staging/pending_review.json staging/archive/pending_review-$(date +%Y%m%dT%H%M%SZ).json
+```
+
+## Confirm Clear State
+
+```sh
+./startday.sh
+PYTHONPATH=src python3 -m looping_box.supervisor --once
+PYTHONPATH=src python3 -m looping_box.supervisor --status
+```
+
+The status should be clear. If it reports pending review again, another inbox
+file still contains boundary-gate language or the reviewed file changed since
+the decision was recorded.

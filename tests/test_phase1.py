@@ -84,10 +84,12 @@ class Phase1IngestionTests(unittest.TestCase):
         payload_path = self.root / "staging" / "pending_review.json"
         self.assertTrue(payload_path.exists())
 
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema"], "looping-box.boundary-review.v1")
-        self.assertEqual(payload["reasons"], ["deploy", "send"])
-        self.assertEqual(payload["items"][0]["relative_path"], "inbox/release.txt")
+        index = json.loads(payload_path.read_text(encoding="utf-8"))
+        self.assertEqual(index["schema"], "looping-box.pending-review-index.v1")
+        payload = json.loads((self.root / index["latest"]).read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema"], "looping-box.review-payload.v1")
+        self.assertEqual(payload["risk_reasons"], ["deploy", "send"])
+        self.assertEqual(payload["source_items"][0]["relative_path"], "inbox/release.txt")
 
     def test_review_files_resurface_until_handled(self):
         (self.root / "inbox" / "release.txt").write_text(

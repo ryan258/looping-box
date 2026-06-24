@@ -1,0 +1,56 @@
+{
+  "title": "looping-box.worker.output.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "worker_id",
+    "run_id",
+    "generated_at",
+    "status",
+    "inputs",
+    "outputs",
+    "errors"
+  ],
+  "properties": {
+    "schema": {"const": "looping-box.worker.output.v1"},
+    "worker_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "status": {
+      "enum": [
+        "idle",
+        "ready",
+        "running",
+        "blocked",
+        "failed",
+        "complete",
+        "pending_review"
+      ]
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["source_deltas"],
+      "properties": {
+        "source_deltas": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "required": ["artifacts"],
+      "properties": {
+        "artifacts": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    }
+  }
+}

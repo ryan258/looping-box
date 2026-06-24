@@ -1,0 +1,7 @@
+{
+  "schema": "looping-box.worker.config.v1",
+  "worker_id": "execution_engine",
+  "description": "Produces deterministic local drafts from context packages.",
+  "input_path": "cache/workers/context_builder/context_package.json",
+  "output_dir": "cache/workers/execution_engine"
+}

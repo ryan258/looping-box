@@ -8,10 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .action_policy import classify_reasons
+
 
 STATE_SCHEMA = "looping-box.phase1.state.v1"
 DELTA_SCHEMA = "looping-box.phase1.delta.v1"
 BOUNDARY_SCHEMA = "looping-box.boundary-review.v1"
+PENDING_REVIEW_INDEX_SCHEMA = "looping-box.pending-review-index.v1"
+REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
 
 
 def run_phase1(
@@ -79,14 +83,24 @@ def run_phase1(
             "relative_path": relative_path,
             "sha256": content_hash,
             "size_bytes": file_stat.st_size,
-            "mtime_ns": file_stat.st_mtime_ns,
             "matched_routes": matched_routes,
             "review_reasons": review_reasons,
             "excerpt": _excerpt(text, int(sop.get("max_excerpt_chars", 500))),
         }
-        changes.append(change)
 
         if review_reasons:
+            review_id = _review_id([change])
+            if _decision_record_exists(resolved_staging_dir, review_id):
+                skipped.append(
+                    {
+                        "relative_path": relative_path,
+                        "sha256": content_hash,
+                        "reason": "review_decision_recorded",
+                    }
+                )
+                _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
+                continue
+            changes.append(change)
             review_items.append(change)
             for reason in review_reasons:
                 if reason not in all_review_reasons:
@@ -96,6 +110,7 @@ def run_phase1(
             # staging payload) every run until a human handles/removes it.
             continue
 
+        changes.append(change)
         _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
 
     boundary_gate = _build_boundary_gate(
@@ -300,22 +315,75 @@ def _build_boundary_gate(
             "reasons": [],
         }
 
-    payload = {
-        "schema": BOUNDARY_SCHEMA,
-        "generated_at": generated_at,
-        "notification_message": sop.get("boundary_gate", {}).get(
-            "notification_message",
-            "Boundary gate review required",
-        ),
-        "reasons": reasons,
-        "items": review_items,
-    }
-    payload_path = staging_dir / "pending_review.json"
-    _write_json(payload_path, payload)
+    index_path = staging_dir / "pending_review.json"
+    index = _read_pending_review_index(index_path)
+    reviews = _active_review_refs(root, staging_dir, index["reviews"])
+    latest = ""
+    for item in review_items:
+        review_id = _review_id([item])
+        if _decision_record_exists(staging_dir, review_id):
+            continue
+        review_payload_path = staging_dir / "reviews" / f"{review_id}.json"
+        review_payload = {
+            "schema": REVIEW_PAYLOAD_SCHEMA,
+            "review_id": review_id,
+            "generated_at": generated_at,
+            "source": "phase1",
+            "notification_message": sop.get("boundary_gate", {}).get(
+                "notification_message",
+                "Boundary gate review required",
+            ),
+            "action_class": classify_reasons(root, list(item.get("review_reasons", []))),
+            "risk_reasons": list(item.get("review_reasons", [])),
+            "source_items": [item],
+            "generated_artifacts": [],
+            "verifier": {
+                "required": True,
+                "status": "pending",
+                "result": None,
+            },
+            "suggested_verification": [
+                "Inspect the source item listed in source_items before taking any outward action.",
+                "Confirm the action is intentional, safe, and still requested.",
+            ],
+        }
+        if not review_payload_path.exists():
+            _write_json(review_payload_path, review_payload)
+
+        review_ref = _rel(root, review_payload_path)
+        reviews = [existing for existing in reviews if existing != review_ref]
+        reviews.append(review_ref)
+        latest = review_ref
+
+    if not latest:
+        _write_json(
+            index_path,
+            {
+                "schema": PENDING_REVIEW_INDEX_SCHEMA,
+                "generated_at": generated_at,
+                "latest": reviews[-1] if reviews else "",
+                "reviews": reviews,
+            },
+        )
+        return {
+            "status": "clear",
+            "payload": None,
+            "reasons": [],
+        }
+
+    _write_json(
+        index_path,
+        {
+            "schema": PENDING_REVIEW_INDEX_SCHEMA,
+            "generated_at": generated_at,
+            "latest": latest,
+            "reviews": reviews,
+        },
+    )
 
     return {
         "status": "pending_review",
-        "payload": _rel(root, payload_path),
+        "payload": _rel(root, index_path),
         "reasons": reasons,
     }
 
@@ -325,6 +393,79 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     temp_path = path.with_name(f"{path.name}.tmp")
     temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temp_path.replace(path)
+
+
+def _read_pending_review_index(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "schema": PENDING_REVIEW_INDEX_SCHEMA,
+            "generated_at": "",
+            "latest": "",
+            "reviews": [],
+        }
+    try:
+        index = _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {
+            "schema": PENDING_REVIEW_INDEX_SCHEMA,
+            "generated_at": "",
+            "latest": "",
+            "reviews": [],
+        }
+    if index.get("schema") != PENDING_REVIEW_INDEX_SCHEMA:
+        return {
+            "schema": PENDING_REVIEW_INDEX_SCHEMA,
+            "generated_at": "",
+            "latest": "",
+            "reviews": [],
+        }
+    index.setdefault("reviews", [])
+    index.setdefault("latest", "")
+    return index
+
+
+def _review_id(review_items: list[dict[str, Any]]) -> str:
+    basis = json.dumps(
+        {
+            "items": [
+                {
+                    "relative_path": item.get("relative_path"),
+                    "sha256": item.get("sha256"),
+                    "review_reasons": item.get("review_reasons", []),
+                }
+                for item in review_items
+            ],
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+    return f"review-{digest}"
+
+
+def _decision_record_exists(staging_dir: Path, review_id: str) -> bool:
+    return (
+        (staging_dir / "approvals" / f"{review_id}.json").exists()
+        or (staging_dir / "rejections" / f"{review_id}.json").exists()
+    )
+
+
+def _active_review_refs(root: Path, staging_dir: Path, review_refs: list[str]) -> list[str]:
+    active: list[str] = []
+    for review_ref in review_refs:
+        try:
+            review_path = _resolve_under_root(root, review_ref)
+        except ValueError:
+            continue
+        if not review_path.exists():
+            continue
+        try:
+            payload = _read_json(review_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        review_id = payload.get("review_id")
+        if review_id and not _decision_record_exists(staging_dir, str(review_id)):
+            active.append(review_ref)
+    return active
 
 
 def _rel(root: Path, path: Path) -> str:
