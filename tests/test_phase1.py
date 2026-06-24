@@ -1,0 +1,94 @@
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from looping_box.phase1 import run_phase1
+
+
+class Phase1IngestionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        (self.root / "config" / "sops").mkdir(parents=True)
+        (self.root / "inbox").mkdir()
+
+        self.sop_path = self.root / "config" / "sops" / "phase1_ingestion.json"
+        self.sop_path.write_text(
+            json.dumps(
+                {
+                    "name": "Phase 1 Ingestion",
+                    "allowed_extensions": [".md", ".txt", ".json"],
+                    "routes": [
+                        {"label": "documentation", "keywords": ["docs", "readme"]},
+                        {"label": "task_backlog", "keywords": ["todo", "backlog"]},
+                    ],
+                    "boundary_gate": {
+                        "requires_review_keywords": ["deploy", "commit", "send"],
+                        "notification_message": "Review required",
+                    },
+                    "max_excerpt_chars": 120,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_new_input_file_writes_delta_and_updates_state(self):
+        (self.root / "inbox" / "notes.md").write_text(
+            "# Docs\n\nTODO: summarize the readme.",
+            encoding="utf-8",
+        )
+
+        result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+        self.assertEqual(result["summary"]["scanned"], 1)
+        self.assertEqual(result["summary"]["changed"], 1)
+        self.assertEqual(result["boundary_gate"]["status"], "clear")
+        self.assertEqual(result["changes"][0]["relative_path"], "inbox/notes.md")
+        self.assertEqual(result["changes"][0]["matched_routes"], ["documentation", "task_backlog"])
+
+        delta_path = self.root / result["delta_path"]
+        state_path = self.root / "cache" / "state" / "phase1_state.json"
+        self.assertTrue(delta_path.exists())
+        self.assertTrue(state_path.exists())
+
+    def test_repeated_run_skips_identical_content(self):
+        (self.root / "inbox" / "notes.md").write_text(
+            "Backlog item for docs.",
+            encoding="utf-8",
+        )
+
+        run_phase1(self.root, now="2026-06-24T12:00:00Z")
+        result = run_phase1(self.root, now="2026-06-24T12:01:00Z")
+
+        self.assertEqual(result["summary"]["scanned"], 1)
+        self.assertEqual(result["summary"]["changed"], 0)
+        self.assertEqual(result["summary"]["skipped"], 1)
+        self.assertEqual(result["skipped"][0]["reason"], "already_processed")
+
+    def test_review_keywords_materialize_pending_review_payload(self):
+        (self.root / "inbox" / "release.txt").write_text(
+            "Please deploy this change and send the announcement.",
+            encoding="utf-8",
+        )
+
+        result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+        self.assertEqual(result["boundary_gate"]["status"], "pending_review")
+        payload_path = self.root / "staging" / "pending_review.json"
+        self.assertTrue(payload_path.exists())
+
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema"], "looping-box.boundary-review.v1")
+        self.assertEqual(payload["reasons"], ["deploy", "send"])
+        self.assertEqual(payload["items"][0]["relative_path"], "inbox/release.txt")
+
+
+if __name__ == "__main__":
+    unittest.main()

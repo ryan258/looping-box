@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+.venv/
+
+cache/deltas/*.json
+cache/state/*.json
+staging/pending_review.json
+

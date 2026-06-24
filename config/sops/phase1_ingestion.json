@@ -1,0 +1,60 @@
+{
+  "name": "Phase 1 Local Ingestion",
+  "allowed_extensions": [
+    ".md",
+    ".txt",
+    ".json"
+  ],
+  "routes": [
+    {
+      "label": "documentation",
+      "keywords": [
+        "docs",
+        "documentation",
+        "readme",
+        "adr",
+        "decision"
+      ]
+    },
+    {
+      "label": "task_backlog",
+      "keywords": [
+        "todo",
+        "task",
+        "backlog",
+        "next step",
+        "action item"
+      ]
+    },
+    {
+      "label": "context_package",
+      "keywords": [
+        "context",
+        "summary",
+        "brief",
+        "notes",
+        "requirements"
+      ]
+    }
+  ],
+  "boundary_gate": {
+    "requires_review_keywords": [
+      "commit",
+      "push",
+      "deploy",
+      "publish",
+      "send",
+      "email",
+      "execute",
+      "run script",
+      "delete",
+      "remove",
+      "credential",
+      "secret",
+      "production"
+    ],
+    "notification_message": "Boundary gate review required before outward action."
+  },
+  "max_excerpt_chars": 500
+}
+
