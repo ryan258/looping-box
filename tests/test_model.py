@@ -134,7 +134,7 @@ class ModelLayerTests(unittest.TestCase):
         draft = json.loads((self.root / "cache" / "workers" / "execution_engine" / "draft.json").read_text())
         self.assertEqual(draft["items"][0]["draft"], "MODEL DRAFT")
 
-    def test_worker_contains_model_error(self):
+    def test_worker_model_error_is_structured_failure(self):
         self._seed_offline_context()
         self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_EXECUTION_ENGINE=vendor/model-1\n")
         model._env_loaded_for.clear()
@@ -144,10 +144,11 @@ class ModelLayerTests(unittest.TestCase):
 
         model._transport = failing
         out = run_worker(self.root, "execution_engine", now="2026-06-24T12:03:00Z")
-        # Degrades to deterministic excerpt instead of crashing the pass.
-        self.assertEqual(out["status"], "complete")
-        draft = json.loads((self.root / "cache" / "workers" / "execution_engine" / "draft.json").read_text())
-        self.assertNotIn("model", draft["items"][0])
+        # A model outage surfaces as a structured failed output, not a crash and
+        # not a silently degraded draft.
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["errors"][0]["code"], "model_error")
+        self.assertEqual(out["outputs"]["artifacts"], [])
 
     def test_verifier_fails_closed_on_model_error(self):
         from looping_box.review import list_reviews, run_verifier

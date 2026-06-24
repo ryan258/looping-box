@@ -127,7 +127,19 @@ def _run_context_builder(
         prompt = "Summarize these routed inputs into a short context briefing:\n\n" + "\n".join(
             f"- {item['relative_path']}: {item['excerpt']}" for item in items
         )
-        completion = _try_model("context_builder", prompt, root_path)
+        try:
+            completion = model.generate_if_enabled("context_builder", prompt, root=root_path)
+        except model.ModelError as exc:
+            output = _worker_output(
+                "context_builder",
+                generated_at,
+                "failed",
+                source_deltas,
+                [],
+                [{"code": "model_error", "message": str(exc)}],
+            )
+            _persist_worker_output(root_path, output_dir, output, dry_run)
+            return output
         if completion is not None:
             context["synthesis"] = {
                 "text": completion["text"],
@@ -210,12 +222,25 @@ def _run_execution_engine(
 
     draft_path = output_dir / "draft.json"
     draft_markdown_path = output_dir / "draft.md"
+    try:
+        draft_items = [_draft_item(root_path, item, dry_run) for item in context.get("items", [])]
+    except model.ModelError as exc:
+        output = _worker_output(
+            "execution_engine",
+            generated_at,
+            "failed",
+            source_deltas,
+            [],
+            [{"code": "model_error", "message": str(exc)}],
+        )
+        _persist_worker_output(root_path, output_dir, output, dry_run)
+        return output
     draft = {
         "schema": EXECUTION_DRAFT_SCHEMA,
         "generated_at": generated_at,
         "source_context": _rel(root_path, context_path),
         "source_context_sha256": context_hash,
-        "items": [_draft_item(root_path, item, dry_run) for item in context.get("items", [])],
+        "items": draft_items,
     }
     artifacts = [_rel(root_path, draft_path), _rel(root_path, draft_markdown_path)]
     output = _worker_output(
@@ -254,25 +279,14 @@ def _draft_item(root: Path, item: dict[str, Any], dry_run: bool) -> dict[str, An
         f"Routes: {', '.join(item.get('matched_routes', [])) or 'none'}.\n\n"
         f"{item.get('excerpt', '')}"
     )
-    completion = _try_model("execution_engine", prompt, root)
+    # On a model/network error this raises model.ModelError, which the caller
+    # turns into a structured `failed` worker output (visible to the operator).
+    completion = model.generate_if_enabled("execution_engine", prompt, root=root)
     if completion is not None:
         drafted["draft"] = completion["text"]
         drafted["model"] = completion["model"]
         drafted["response_sha256"] = completion["response_sha256"]
     return drafted
-
-
-def _try_model(role: str, prompt: str, root: Path) -> dict[str, Any] | None:
-    """Call the role's model if configured, degrading to deterministic output
-    (return None) on any model/network/provider error. Used only for the worker
-    enhancement paths where the deterministic fallback is acceptable; the review
-    verifier fails closed instead."""
-    try:
-        return model.generate_if_enabled(role, prompt, root=root)
-    except Exception:
-        # ponytail: a transient OpenRouter failure must not crash a worker pass;
-        # fall back to the deterministic excerpt rather than fail the pipeline.
-        return None
 
 
 def _worker_output(

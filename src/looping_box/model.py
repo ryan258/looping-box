@@ -23,6 +23,14 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _env_loaded_for: set[str] = set()
 
 
+class ModelError(RuntimeError):
+    """A configured model call failed (network, provider, or response shape).
+
+    Callers catch this to turn an outage into a structured failure instead of
+    an unhandled crash.
+    """
+
+
 def load_env(root: Path | str = ".") -> None:
     """Load `<root>/.env` into os.environ once per root. Existing vars win."""
     key = str(Path(root).resolve())
@@ -85,9 +93,12 @@ def complete(
     ).encode("utf-8")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    raw = _transport(f"{base_url}/chat/completions", headers, body)
-    data = json.loads(raw)
-    text = data["choices"][0]["message"]["content"]
+    try:
+        raw = _transport(f"{base_url}/chat/completions", headers, body)
+        data = json.loads(raw)
+        text = data["choices"][0]["message"]["content"]
+    except Exception as exc:  # network, JSON, or unexpected provider shape
+        raise ModelError(f"{role} model call failed: {exc}") from exc
     # temperature=0 is requested, but providers don't guarantee determinism, so
     # callers key idempotency on (input hash + model id) and store this hash.
     return {
