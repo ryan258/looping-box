@@ -17,3 +17,4 @@ staging/approvals/*.json
 staging/rejections/*.json
 staging/reviews/*.json
 staging/archive/*.json
+.DS_Store

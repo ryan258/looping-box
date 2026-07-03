@@ -27,8 +27,8 @@ the baseline. The roadmap retains only deferred, post-Phase-4 work.
   deltas and review payloads have schema fixtures; operator recovery documented
   in `docs/RECOVERY.md`.
 - Phase 2 - Worker loops: worker output contracts versioned in `docs/schemas/`
-  with examples in `docs/contracts/`; worker definitions in `config/workers/`;
-  runtime worker directories preserved with `.gitkeep`; `context_builder`
+  with examples in `docs/contracts/`; runtime worker directories preserved with
+  `.gitkeep`; `context_builder`
   consumes Phase 1 deltas once and emits a bounded context package;
   boundary-gated items become blocked context inputs; `execution_engine` reads
   only the context package and writes deterministic local drafts;
@@ -79,6 +79,23 @@ the baseline. The roadmap retains only deferred, post-Phase-4 work.
 - Deltas generated in the same second no longer clobber each other:
   `_unique_run_id` appends a numeric suffix when a delta file already exists.
 - SOP routes missing a `label` are skipped instead of raising `KeyError`.
+- Supervisor `payload_size_limit` and `worker_timeout` blocks are now durable:
+  a worker call was persisting its own state (consumed inputs, last-seen hash)
+  as a side effect before the supervisor decided to block on it, so a rerun
+  saw no new work and silently cleared `operator_action_required` with the
+  oversized/slow artifact still unresolved. Worker state is now snapshotted
+  before each run and restored when the run ends up blocked, so the exact
+  same work is retried, and stays blocked, until the operator actually raises
+  the limit (matching `file_count_limit`, which was never affected since it
+  blocks before any worker runs).
+- Removed `config/workers/context_builder.json` and
+  `config/workers/execution_engine.json`: dead config never read by any code.
+- Removed `docs/schemas/phase1_boundary_review.schema.json`: an unreferenced,
+  byte-identical duplicate of `pending_review_index.schema.json`.
+- `supervisor --status` no longer tells the operator to "handle the source
+  file" for resource-limit blocks (`file_count_limit`, `payload_size_limit`,
+  `worker_timeout`) — there isn't one. It now points at `config/super_loop.json`
+  instead. Content-review blocks are unaffected.
 
 ### Tests
 
@@ -86,3 +103,8 @@ the baseline. The roadmap retains only deferred, post-Phase-4 work.
   `test_distinct_empty_files_are_each_processed`,
   `test_input_outside_root_is_rejected`, `test_dotdot_traversal_is_rejected`,
   and `test_symlink_escaping_root_is_not_ingested`.
+- Added `test_payload_size_limit_stays_blocked_until_config_is_raised` and
+  `test_worker_timeout_stays_blocked_until_config_is_raised`.
+- Added schema-fixture coverage for `action_classes`, `review_record`,
+  `verifier_result`, and `world_state` (previously untested against real
+  generated output).

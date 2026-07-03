@@ -8,7 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from looping_box.phase1 import run_phase1
+from looping_box.schema import validate
 from looping_box.supervisor import load_world_state, run_supervisor, status_summary
+
+SCHEMA_DIR = ROOT / "docs" / "schemas"
+WORLD_STATE_SCHEMA = json.loads((SCHEMA_DIR / "world_state.schema.json").read_text())
 
 
 def _make_sop(root: Path) -> None:
@@ -47,6 +51,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(state["worker_states"]["context_builder"]["status"], "complete")
             self.assertEqual(state["worker_states"]["execution_engine"]["status"], "complete")
             self.assertTrue((root / "logs" / "transactions" / "supervisor.jsonl").exists())
+            validate(state, WORLD_STATE_SCHEMA)
 
             second = run_supervisor(root, now="2026-06-24T12:02:00Z")
             self.assertEqual(second["status"], "idle")
@@ -143,6 +148,73 @@ class SupervisorTests(unittest.TestCase):
             self.assertFalse(
                 (root / "cache" / "workers" / "context_builder" / "context_package.json").exists()
             )
+
+    def test_payload_size_limit_stays_blocked_until_config_is_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "config" / "super_loop.json").write_text(
+                json.dumps({"max_payload_bytes": 1}) + "\n", encoding="utf-8"
+            )
+            (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:00:00Z")
+
+            first = run_supervisor(root, now="2026-06-24T12:01:00Z")
+            self.assertEqual(first["status"], "blocked")
+            self.assertEqual(first["recovery"]["blocked_reason"], "payload_size_limit")
+
+            second = run_supervisor(root, now="2026-06-24T12:02:00Z")
+            self.assertEqual(second["status"], "blocked")
+            self.assertEqual(second["recovery"]["blocked_reason"], "payload_size_limit")
+
+            (root / "config" / "super_loop.json").write_text(
+                json.dumps({"max_payload_bytes": 65536}) + "\n", encoding="utf-8"
+            )
+            third = run_supervisor(root, now="2026-06-24T12:03:00Z")
+            self.assertEqual(third["status"], "complete")
+
+            summary = status_summary(root)
+            self.assertIn("clear", summary)
+
+    def test_status_summary_points_resource_limit_blocks_at_config_not_a_source_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "config" / "super_loop.json").write_text(
+                json.dumps({"max_payload_bytes": 1}) + "\n", encoding="utf-8"
+            )
+            (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:00:00Z")
+            run_supervisor(root, now="2026-06-24T12:01:00Z")
+
+            summary = status_summary(root)
+            self.assertIn("operator action required", summary)
+            self.assertIn("config/super_loop.json", summary)
+            self.assertNotIn("source file", summary)
+
+    def test_worker_timeout_stays_blocked_until_config_is_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "config" / "super_loop.json").write_text(
+                json.dumps({"max_worker_runtime_seconds": -1}) + "\n", encoding="utf-8"
+            )
+            (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:00:00Z")
+
+            first = run_supervisor(root, now="2026-06-24T12:01:00Z")
+            self.assertEqual(first["status"], "blocked")
+            self.assertEqual(first["recovery"]["blocked_reason"], "worker_timeout")
+
+            second = run_supervisor(root, now="2026-06-24T12:02:00Z")
+            self.assertEqual(second["status"], "blocked")
+            self.assertEqual(second["recovery"]["blocked_reason"], "worker_timeout")
+
+            (root / "config" / "super_loop.json").write_text(
+                json.dumps({"max_worker_runtime_seconds": 30}) + "\n", encoding="utf-8"
+            )
+            third = run_supervisor(root, now="2026-06-24T12:03:00Z")
+            self.assertEqual(third["status"], "complete")
 
 
 if __name__ == "__main__":

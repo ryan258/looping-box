@@ -63,17 +63,30 @@ def load_world_state(root: Path | str) -> dict[str, Any]:
     return state
 
 
+_RESOURCE_LIMIT_REASONS = {"file_count_limit", "payload_size_limit", "worker_timeout"}
+
+
 def status_summary(root: Path | str) -> str:
     root_path = Path(root).resolve()
     state = load_world_state(root_path)
     recovery = state["recovery"]
     if recovery.get("operator_action_required"):
         payload = recovery.get("pending_review_payload") or "cache/supervisor/blocked.json"
+        # Resource-limit blocks (see docs/RECOVERY.md) have no source file to
+        # handle; the fix is a config/super_loop.json change or a smaller batch.
+        # Content-review blocks point at staging/pending_review.json instead.
+        if recovery.get("blocked_reason") in _RESOURCE_LIMIT_REASONS:
+            next_step = (
+                "inspect the pending payload, then raise the matching limit in "
+                "config/super_loop.json or shrink the batch, then run ./startday.sh"
+            )
+        else:
+            next_step = "inspect the pending payload, handle the source file, then run ./startday.sh"
         return "\n".join(
             [
                 "status: operator action required",
                 f"pending: {payload}",
-                "Next: inspect the pending payload, handle the source file, then run ./startday.sh",
+                f"Next: {next_step}",
             ]
         )
     if recovery.get("last_error"):
@@ -118,6 +131,12 @@ def _run_supervisor_locked(
 
     plan: list[str] = []
     worker_outputs: list[dict[str, Any]] = []
+    # Resource-limit blocks (worker_timeout, payload_size_limit) must be as durable
+    # as file_count_limit: a worker call already persists its own state (consumed
+    # inputs, last-seen hash) as a side effect, so a post-hoc block that doesn't
+    # undo that would silently self-heal on the next run with no operator action.
+    # Snapshot state before each worker runs and restore it if we end up blocking.
+    ran_workers: dict[str, str | None] = {}
     if new_deltas and _can_route(config, "phase1_delta", "context_builder"):
         plan.append("context_builder")
 
@@ -130,8 +149,14 @@ def _run_supervisor_locked(
         plan.append("execution_engine")
 
     if "context_builder" in plan:
+        ran_workers["context_builder"] = _snapshot_worker_state(root, "context_builder")
         context_output = _run_worker_with_runtime(root, "context_builder", generated_at, config)
         worker_outputs.append(context_output)
+        if _is_worker_timeout(context_output):
+            return _blocked_with_rollback(
+                root, state, generated_at, "worker_timeout",
+                context_output["errors"][0]["message"], new_delta_refs, ran_workers,
+            )
         if (
             context_output["status"] in {"complete", "blocked"}
             and _can_route(config, "context_builder", "execution_engine")
@@ -140,19 +165,21 @@ def _run_supervisor_locked(
             plan.append("execution_engine")
 
     if "execution_engine" in plan:
+        ran_workers["execution_engine"] = _snapshot_worker_state(root, "execution_engine")
         execution_output = _run_worker_with_runtime(root, "execution_engine", generated_at, config)
         worker_outputs.append(execution_output)
+        if _is_worker_timeout(execution_output):
+            return _blocked_with_rollback(
+                root, state, generated_at, "worker_timeout",
+                execution_output["errors"][0]["message"], new_delta_refs, ran_workers,
+            )
 
     payload_limit = int(config.get("max_payload_bytes", DEFAULT_CONFIG["max_payload_bytes"]))
     oversized = _oversized_artifact(root, worker_outputs, payload_limit)
     if oversized is not None:
-        return _blocked(
-            root,
-            state,
-            generated_at,
-            "payload_size_limit",
-            f"{oversized} exceeds limit {payload_limit} bytes",
-            new_delta_refs,
+        return _blocked_with_rollback(
+            root, state, generated_at, "payload_size_limit",
+            f"{oversized} exceeds limit {payload_limit} bytes", new_delta_refs, ran_workers,
         )
 
     status = _overall_status(worker_outputs)
@@ -184,6 +211,45 @@ def _run_supervisor_locked(
     }
     _append_audit(root, generated_at, result)
     return result
+
+
+def _worker_state_path(root: Path, worker_id: str) -> Path:
+    return _resolve_under_root(root, f"cache/workers/{worker_id}/state.json")
+
+
+def _snapshot_worker_state(root: Path, worker_id: str) -> str | None:
+    path = _worker_state_path(root, worker_id)
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def _restore_worker_state(root: Path, worker_id: str, snapshot: str | None) -> None:
+    path = _worker_state_path(root, worker_id)
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(snapshot, encoding="utf-8")
+
+
+def _is_worker_timeout(output: dict[str, Any]) -> bool:
+    return output["status"] == "blocked" and any(
+        error.get("code") == "worker_timeout" for error in output["errors"]
+    )
+
+
+def _blocked_with_rollback(
+    root: Path,
+    state: dict[str, Any],
+    generated_at: str,
+    reason: str,
+    message: str,
+    source_deltas: list[str],
+    ran_workers: dict[str, str | None],
+) -> dict[str, Any]:
+    # Undo the state each ran worker already persisted so the exact same work
+    # is retried next run instead of the block silently clearing itself.
+    for worker_id, snapshot in ran_workers.items():
+        _restore_worker_state(root, worker_id, snapshot)
+    return _blocked(root, state, generated_at, reason, message, source_deltas)
 
 
 def _blocked(

@@ -1,7 +1,0 @@
-{
-  "schema": "looping-box.worker.config.v1",
-  "worker_id": "context_builder",
-  "description": "Builds bounded context packages from Phase 1 deltas.",
-  "input_glob": "cache/deltas/*.json",
-  "output_dir": "cache/workers/context_builder"
-}

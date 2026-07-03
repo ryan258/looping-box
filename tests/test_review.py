@@ -13,6 +13,8 @@ from looping_box.review import list_reviews, record_review
 from looping_box.schema import validate
 
 SCHEMA_DIR = ROOT / "docs" / "schemas"
+REVIEW_RECORD_SCHEMA = json.loads((SCHEMA_DIR / "review_record.schema.json").read_text())
+VERIFIER_RESULT_SCHEMA = json.loads((SCHEMA_DIR / "verifier_result.schema.json").read_text())
 
 
 def _make_sop(root: Path) -> None:
@@ -130,6 +132,9 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(record["decision"], "approved")
             self.assertTrue((root / record["verifier_result"]).exists())
             self.assertEqual(list_reviews(root), [])
+            validate(record, REVIEW_RECORD_SCHEMA)
+            verifier_result = json.loads((root / record["verifier_result"]).read_text())
+            validate(verifier_result, VERIFIER_RESULT_SCHEMA)
 
     def test_review_records_rejection(self):
         with tempfile.TemporaryDirectory() as tmp:

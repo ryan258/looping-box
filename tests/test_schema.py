@@ -14,6 +14,7 @@ SCHEMA_DIR = ROOT / "docs" / "schemas"
 DELTA_SCHEMA = json.loads((SCHEMA_DIR / "phase1_delta.schema.json").read_text())
 PENDING_REVIEW_INDEX_SCHEMA = json.loads((SCHEMA_DIR / "pending_review_index.schema.json").read_text())
 REVIEW_PAYLOAD_SCHEMA = json.loads((SCHEMA_DIR / "review_payload.schema.json").read_text())
+ACTION_CLASSES_SCHEMA = json.loads((SCHEMA_DIR / "action_classes.schema.json").read_text())
 
 
 def _make_sop(root: Path) -> None:
@@ -89,6 +90,10 @@ class SchemaFixtureTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             validate(broken, DELTA_SCHEMA)
+
+    def test_repo_action_classes_config_matches_schema(self):
+        config = json.loads((ROOT / "config" / "action_classes.json").read_text())
+        validate(config, ACTION_CLASSES_SCHEMA)
 
 
 if __name__ == "__main__":
