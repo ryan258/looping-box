@@ -6,12 +6,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
-export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "DEMO 3: A human approves the held item, and the nagging stops."
 echo "------------------------------------------------------------"
 
-REVIEW_ID="$(python3 -m looping_box.review list | head -1 | cut -d' ' -f1)"
+REVIEW_ID="$(looping-box-review list | head -1 | cut -d' ' -f1)"
 if [ -z "${REVIEW_ID}" ]; then
   echo "Nothing is waiting for review. Run ./demo-2.sh first, then try again."
   exit 0
@@ -20,11 +19,11 @@ fi
 echo "Found the item waiting for a decision: ${REVIEW_ID}"
 echo
 echo "What is being asked (the full record a reviewer would read):"
-python3 -m looping_box.review show "${REVIEW_ID}"
+looping-box-review show "${REVIEW_ID}"
 
 echo
 echo "A person approves it, leaving a note for the record..."
-if python3 -m looping_box.review approve "${REVIEW_ID}" --note "Checked with the team, good to go"; then
+if looping-box-review approve "${REVIEW_ID}" --note "Checked with the team, good to go"; then
   echo
   echo "Running the loop one more time..."
   echo

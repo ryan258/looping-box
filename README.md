@@ -12,7 +12,8 @@ routing, supervision, and human review with the file system as the boundary.
   (`safe_local_transform`, `review_required`, `blocked`, `forbidden`).
 - `inbox/` is the local ingestion endpoint for `.md`, `.txt`, and `.json` inputs.
 - `cache/state/` stores processed-content state.
-- `cache/deltas/` stores structured delta JSON for each run.
+- `cache/deltas/` stores active delta JSON; observed deltas move to
+  `cache/deltas/archive/`.
 - `cache/workers/` stores worker state and generated local artifacts.
 - `cache/verifiers/` stores deterministic review-verifier results.
 - `cache/supervisor/` stores the blocked-cycle payload when a supervisor
@@ -21,12 +22,18 @@ routing, supervision, and human review with the file system as the boundary.
 - `staging/` stores `pending_review.json` plus review decision records when the
   boundary gate is tripped.
 - `.world_state.json` (repo root, git-ignored) tracks supervisor run history,
-  worker states, and recovery status; read via `supervisor --status`.
+  worker states, and recovery status; read via `looping-box-supervisor --status`.
 
   See [docs/RECOVERY.md](docs/RECOVERY.md) for how to clear a pending review
   or a resource-limit block and resume.
 
 ## Run
+
+Install the local console scripts once:
+
+```sh
+python3 -m pip install -e .
+```
 
 Place source files in `inbox/`, then run:
 
@@ -40,17 +47,17 @@ clear or pending review. Runtime state and deltas are ignored by git.
 Run the worker/supervisor loop:
 
 ```sh
-PYTHONPATH=src python3 -m looping_box.supervisor --once
-PYTHONPATH=src python3 -m looping_box.supervisor --status
+looping-box-supervisor --once
+looping-box-supervisor --status
 ```
 
 Inspect or record review decisions:
 
 ```sh
-PYTHONPATH=src python3 -m looping_box.review list
-PYTHONPATH=src python3 -m looping_box.review show <review_id>
-PYTHONPATH=src python3 -m looping_box.review approve <review_id> --note "handled manually"
-PYTHONPATH=src python3 -m looping_box.review reject <review_id> --note "not allowed"
+looping-box-review list
+looping-box-review show <review_id>
+looping-box-review approve <review_id> --note "handled manually"
+looping-box-review reject <review_id> --note "not allowed"
 ```
 
 ## Verify
@@ -76,6 +83,7 @@ network. `.env` is git-ignored.
 - All generated outputs are materialized as local JSON files.
 - Workers communicate through file artifacts only.
 - Approvals and rejections are explicit local records, not inferred from content.
-- Supervisor resource-limit blocks (file count, payload size, worker runtime)
+- Deterministic supervisor resource-limit blocks (file count and payload size)
   persist across reruns until the operator raises the limit or shrinks the
-  batch — they never silently self-clear.
+  batch. Worker-runtime blocks roll back local worker output and retry the same
+  work; a genuinely transient timeout can clear on a later rerun.

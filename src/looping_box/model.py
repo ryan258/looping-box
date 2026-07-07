@@ -34,6 +34,8 @@ class ModelError(RuntimeError):
 def load_env(root: Path | str = ".") -> None:
     """Load `<root>/.env` into os.environ once per root. Existing vars win."""
     key = str(Path(root).resolve())
+    # ponytail: one-shot CLIs benefit from process-lifetime caching. If daemon
+    # mode lands, reload semantics should change so .env edits can take effect.
     if key in _env_loaded_for:
         return
     _env_loaded_for.add(key)
@@ -57,14 +59,14 @@ def is_enabled(role: str, *, root: Path | str = ".") -> bool:
     return bool(os.environ.get("OPENROUTER_API_KEY") and model_for(role))
 
 
-# Injectable so tests never hit the network: (url, headers, body) -> raw text.
-def _http_post(url: str, headers: dict[str, str], body: bytes) -> str:
+# Injectable so tests never hit the network: (url, headers, body, timeout) -> raw text.
+def _http_post(url: str, headers: dict[str, str], body: bytes, timeout: float) -> str:
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 (trusted base url)
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 (trusted base url)
         return response.read().decode("utf-8")
 
 
-_transport: Callable[[str, dict[str, str], bytes], str] = _http_post
+_transport: Callable[[str, dict[str, str], bytes, float], str] = _http_post
 
 
 def complete(
@@ -74,6 +76,7 @@ def complete(
     system: str | None = None,
     root: Path | str = ".",
     temperature: float = 0.0,
+    timeout: float = 60.0,
 ) -> dict[str, Any]:
     """Call the role's model. Raises if the role/key is not configured."""
     load_env(root)
@@ -94,7 +97,7 @@ def complete(
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     try:
-        raw = _transport(f"{base_url}/chat/completions", headers, body)
+        raw = _transport(f"{base_url}/chat/completions", headers, body, timeout)
         data = json.loads(raw)
         text = data["choices"][0]["message"]["content"]
     except Exception as exc:  # network, JSON, or unexpected provider shape
@@ -114,8 +117,9 @@ def generate_if_enabled(
     *,
     system: str | None = None,
     root: Path | str = ".",
+    timeout: float = 60.0,
 ) -> dict[str, Any] | None:
     """Return a completion for the role, or None when the role isn't configured."""
     if not is_enabled(role, root=root):
         return None
-    return complete(role, prompt, system=system, root=root)
+    return complete(role, prompt, system=system, root=root, timeout=timeout)

@@ -6,6 +6,8 @@ __pycache__/
 .world_state.json
 
 cache/deltas/*.json
+cache/deltas/*.bad*
+cache/deltas/archive/*.json
 cache/state/*.json
 cache/supervisor/*.json
 cache/verifiers/*.json

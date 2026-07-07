@@ -6,14 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from . import model
-from .phase1 import (
-    DELTA_SCHEMA,
-    _rel,
-    _resolve_under_root,
-    _sha256_file,
-    _utc_now,
-    _write_json,
+from ._util import (
+    read_json as _read_json,
+    rel as _rel,
+    resolve_under_root as _resolve_under_root,
+    sha256_file as _sha256_file,
+    utc_now as _utc_now,
+    write_json as _write_json,
 )
+from .phase1 import DELTA_SCHEMA
 
 
 WORKER_OUTPUT_SCHEMA = "looping-box.worker.output.v1"
@@ -28,12 +29,23 @@ def run_worker(
     *,
     now: str | None = None,
     dry_run: bool = False,
+    model_timeout_seconds: float = 60.0,
 ) -> dict[str, Any]:
     """Run one deterministic worker pass."""
     if worker_id == "context_builder":
-        return _run_context_builder(root, now=now, dry_run=dry_run)
+        return _run_context_builder(
+            root,
+            now=now,
+            dry_run=dry_run,
+            model_timeout_seconds=model_timeout_seconds,
+        )
     if worker_id == "execution_engine":
-        return _run_execution_engine(root, now=now, dry_run=dry_run)
+        return _run_execution_engine(
+            root,
+            now=now,
+            dry_run=dry_run,
+            model_timeout_seconds=model_timeout_seconds,
+        )
     raise ValueError(f"unknown worker: {worker_id}")
 
 
@@ -42,6 +54,7 @@ def _run_context_builder(
     *,
     now: str | None,
     dry_run: bool,
+    model_timeout_seconds: float,
 ) -> dict[str, Any]:
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
@@ -63,7 +76,13 @@ def _run_context_builder(
         try:
             delta = _read_json(delta_path)
         except (OSError, json.JSONDecodeError) as exc:
-            errors.append({"code": "malformed_delta", "message": f"{relative_delta}: {exc}"})
+            quarantine_path = _quarantine_delta(delta_path)
+            errors.append(
+                {
+                    "code": "malformed_delta_quarantined",
+                    "message": f"{relative_delta}: {exc}; moved to {_rel(root_path, quarantine_path)}",
+                }
+            )
             continue
         if delta.get("schema") != DELTA_SCHEMA:
             errors.append(
@@ -92,7 +111,7 @@ def _run_context_builder(
             else:
                 items.append(normalized)
 
-    if errors:
+    if errors and not source_deltas:
         output = _worker_output(
             "context_builder",
             generated_at,
@@ -123,12 +142,17 @@ def _run_context_builder(
     }
     # Dry run must have no side effects: a model call costs money and ships file
     # excerpts to OpenRouter, so it is gated behind `not dry_run`.
-    if items and not dry_run:
+    if status == "complete" and items and not dry_run:
         prompt = "Summarize these routed inputs into a short context briefing:\n\n" + "\n".join(
             f"- {item['relative_path']}: {item['excerpt']}" for item in items
         )
         try:
-            completion = model.generate_if_enabled("context_builder", prompt, root=root_path)
+            completion = model.generate_if_enabled(
+                "context_builder",
+                prompt,
+                root=root_path,
+                timeout=model_timeout_seconds,
+            )
         except model.ModelError as exc:
             output = _worker_output(
                 "context_builder",
@@ -153,7 +177,7 @@ def _run_context_builder(
         status,
         source_deltas,
         artifacts,
-        [],
+        errors,
     )
 
     if not dry_run:
@@ -171,6 +195,7 @@ def _run_execution_engine(
     *,
     now: str | None,
     dry_run: bool,
+    model_timeout_seconds: float,
 ) -> dict[str, Any]:
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
@@ -223,7 +248,12 @@ def _run_execution_engine(
     draft_path = output_dir / "draft.json"
     draft_markdown_path = output_dir / "draft.md"
     try:
-        draft_items = [_draft_item(root_path, item, dry_run) for item in context.get("items", [])]
+        draft_items = _draft_items(
+            root_path,
+            list(context.get("items", [])),
+            dry_run,
+            model_timeout_seconds,
+        )
     except model.ModelError as exc:
         output = _worker_output(
             "execution_engine",
@@ -263,15 +293,91 @@ def _run_execution_engine(
     return output
 
 
-def _draft_item(root: Path, item: dict[str, Any], dry_run: bool) -> dict[str, Any]:
-    """Draft one context item. Uses the execution_engine model when configured,
-    otherwise falls back to the item excerpt (deterministic, offline). A model
-    call is skipped entirely during a dry run (no network, no spend)."""
-    drafted = {
+def _draft_items(
+    root: Path,
+    items: list[dict[str, Any]],
+    dry_run: bool,
+    model_timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    if len(items) <= 1:
+        return [_draft_item(root, item, dry_run, model_timeout_seconds) for item in items]
+
+    drafted_items = [_offline_draft_item(item) for item in items]
+    if dry_run:
+        return drafted_items
+
+    payload = [
+        {
+            "relative_path": item.get("relative_path", ""),
+            "matched_routes": list(item.get("matched_routes", [])),
+            "excerpt": item.get("excerpt", ""),
+        }
+        for item in items
+    ]
+    prompt = (
+        "Draft short, local working notes for these routed inputs. "
+        "Return only JSON with this shape: "
+        '{"drafts":[{"relative_path":"...","draft":"..."}]}.\n\n'
+        + json.dumps(payload, sort_keys=True)
+    )
+    completion = model.generate_if_enabled(
+        "execution_engine",
+        prompt,
+        root=root,
+        timeout=model_timeout_seconds,
+    )
+    if completion is None:
+        return drafted_items
+
+    try:
+        data = json.loads(_strip_code_fences(completion["text"]))
+        drafts = data["drafts"]
+        if not isinstance(drafts, list):
+            raise ValueError("drafts is not a list")
+        drafts_by_path = {
+            str(item["relative_path"]): str(item["draft"])
+            for item in drafts
+            if isinstance(item, dict) and "relative_path" in item and "draft" in item
+        }
+        for drafted in drafted_items:
+            relative_path = drafted["relative_path"]
+            if relative_path not in drafts_by_path:
+                raise ValueError(f"missing draft for {relative_path}")
+            drafted["draft"] = drafts_by_path[relative_path]
+            drafted["model"] = completion["model"]
+            drafted["response_sha256"] = completion["response_sha256"]
+    except Exception as exc:
+        raise model.ModelError(f"execution_engine batch response was invalid: {exc}") from exc
+    return drafted_items
+
+
+def _strip_code_fences(text: str) -> str:
+    # Models often wrap JSON in ```json fences despite "return only JSON".
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        lines = stripped.splitlines()
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _offline_draft_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
         "relative_path": item.get("relative_path", ""),
         "matched_routes": list(item.get("matched_routes", [])),
         "draft": item.get("excerpt", ""),
     }
+
+
+def _draft_item(
+    root: Path,
+    item: dict[str, Any],
+    dry_run: bool,
+    model_timeout_seconds: float,
+) -> dict[str, Any]:
+    """Draft one context item. Uses the execution_engine model when configured,
+    otherwise falls back to the item excerpt (deterministic, offline). A model
+    call is skipped entirely during a dry run (no network, no spend)."""
+    drafted = _offline_draft_item(item)
     if dry_run:
         return drafted
     prompt = (
@@ -281,7 +387,12 @@ def _draft_item(root: Path, item: dict[str, Any], dry_run: bool) -> dict[str, An
     )
     # On a model/network error this raises model.ModelError, which the caller
     # turns into a structured `failed` worker output (visible to the operator).
-    completion = model.generate_if_enabled("execution_engine", prompt, root=root)
+    completion = model.generate_if_enabled(
+        "execution_engine",
+        prompt,
+        root=root,
+        timeout=model_timeout_seconds,
+    )
     if completion is not None:
         drafted["draft"] = completion["text"]
         drafted["model"] = completion["model"]
@@ -320,6 +431,16 @@ def _persist_worker_output(
     _write_json(output_dir / "last_output.json", output)
 
 
+def _quarantine_delta(delta_path: Path) -> Path:
+    quarantine_path = delta_path.with_name(f"{delta_path.name}.bad")
+    suffix = 2
+    while quarantine_path.exists():
+        quarantine_path = delta_path.with_name(f"{delta_path.name}.bad{suffix}")
+        suffix += 1
+    delta_path.replace(quarantine_path)
+    return quarantine_path
+
+
 def _read_worker_state(path: Path, worker_id: str) -> dict[str, Any]:
     if not path.exists():
         return {
@@ -334,11 +455,6 @@ def _read_worker_state(path: Path, worker_id: str) -> dict[str, Any]:
     return state
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def _context_markdown(context: dict[str, Any]) -> str:
     lines = [
         "# Context Package",
@@ -349,6 +465,8 @@ def _context_markdown(context: dict[str, Any]) -> str:
         f"Blocked inputs: {len(context['blocked_inputs'])}",
         "",
     ]
+    if "synthesis" in context:
+        lines.extend(["## Synthesis", "", context["synthesis"]["text"], ""])
     for item in context["items"]:
         lines.append(f"- {item['relative_path']} ({', '.join(item['matched_routes']) or 'unrouted'})")
     for item in context["blocked_inputs"]:

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ._util import resolve_under_root as _resolve_under_root
+
 DEFAULT_ACTION_CLASSES = {
     "default_class": "review_required",
     "classes": {
@@ -56,11 +58,3 @@ def _read_action_config(root: Path) -> dict[str, Any]:
         config["default_class"] = loaded.get("default_class", config["default_class"])
         config["classes"] = loaded.get("classes", config["classes"])
     return config
-
-
-def _resolve_under_root(root: Path, value: Path | str) -> Path:
-    path = Path(value)
-    candidate = (path if path.is_absolute() else root / path).resolve()
-    if candidate != root and root not in candidate.parents:
-        raise ValueError(f"path escapes project root: {value!r} -> {candidate}")
-    return candidate

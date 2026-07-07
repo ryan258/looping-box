@@ -58,6 +58,26 @@ class Phase1IngestionTests(unittest.TestCase):
         self.assertTrue(delta_path.exists())
         self.assertTrue(state_path.exists())
 
+    def test_empty_run_updates_state_without_writing_delta(self):
+        result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+        self.assertEqual(result["summary"]["scanned"], 0)
+        self.assertIsNone(result["delta_path"])
+        self.assertEqual(list((self.root / "cache" / "deltas").glob("*.json")), [])
+        state = json.loads((self.root / "cache" / "state" / "phase1_state.json").read_text())
+        self.assertIsNone(state["last_delta_path"])
+        self.assertIsNone(state["runs"][-1]["delta_path"])
+
+    def test_run_id_does_not_collide_with_archived_deltas(self):
+        archive_dir = self.root / "cache" / "deltas" / "archive"
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "phase1-delta-20260624T120000Z.json").write_text("{}", encoding="utf-8")
+        (self.root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
+
+        result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+        self.assertEqual(result["run_id"], "phase1-delta-20260624T120000Z-2")
+
     def test_repeated_run_skips_identical_content(self):
         (self.root / "inbox" / "notes.md").write_text(
             "Backlog item for docs.",
@@ -135,6 +155,16 @@ class Phase1IngestionTests(unittest.TestCase):
 
             self.assertEqual(result["summary"]["changed"], 0)
             self.assertEqual(result["changes"], [])
+
+    def test_in_root_symlink_is_not_ingested(self):
+        secret_path = self.root / ".env"
+        secret_path.write_text("OPENROUTER_API_KEY=sk-live-test\n", encoding="utf-8")
+        (self.root / "inbox" / "leak.md").symlink_to("../.env")
+
+        result = run_phase1(self.root, now="2026-06-24T12:00:00Z")
+
+        self.assertEqual(result["summary"]["changed"], 0)
+        self.assertEqual(result["changes"], [])
 
 
 if __name__ == "__main__":

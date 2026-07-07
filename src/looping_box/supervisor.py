@@ -3,12 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .phase1 import DELTA_SCHEMA, _rel, _resolve_under_root, _sha256_file, _utc_now, _write_json
+from ._util import (
+    read_json as _read_json,
+    rel as _rel,
+    resolve_under_root as _resolve_under_root,
+    sha256_file as _sha256_file,
+    utc_now as _utc_now,
+    write_json as _write_json,
+)
+from .phase1 import DELTA_SCHEMA
 from .worker import run_worker
 
 
@@ -39,8 +48,7 @@ def run_supervisor(root: Path | str, *, now: str | None = None) -> dict[str, Any
     try:
         result = _run_supervisor_locked(root_path, generated_at, config)
     finally:
-        if lock_path.exists():
-            lock_path.unlink()
+        _release_lock(lock_path, os.getpid())
     return result
 
 
@@ -78,7 +86,8 @@ def status_summary(root: Path | str) -> str:
         if recovery.get("blocked_reason") in _RESOURCE_LIMIT_REASONS:
             next_step = (
                 "inspect the pending payload, then raise the matching limit in "
-                "config/super_loop.json or shrink the batch, then run ./startday.sh"
+                "config/super_loop.json or shrink the batch, then run "
+                "looping-box-supervisor --once"
             )
         else:
             next_step = "inspect the pending payload, handle the source file, then run ./startday.sh"
@@ -94,7 +103,7 @@ def status_summary(root: Path | str) -> str:
             [
                 "status: failed",
                 f"error: {recovery['last_error']}",
-                "Next: fix the error and run python3 -m looping_box.supervisor --once",
+                "Next: fix the error and run looping-box-supervisor --once",
             ]
         )
     return "\n".join(
@@ -135,8 +144,9 @@ def _run_supervisor_locked(
     # as file_count_limit: a worker call already persists its own state (consumed
     # inputs, last-seen hash) as a side effect, so a post-hoc block that doesn't
     # undo that would silently self-heal on the next run with no operator action.
-    # Snapshot state before each worker runs and restore it if we end up blocking.
-    ran_workers: dict[str, str | None] = {}
+    # Snapshot worker-local state and artifacts before each run and restore them
+    # if we end up blocking.
+    ran_workers: dict[str, dict[str, bytes] | None] = {}
     if new_deltas and _can_route(config, "phase1_delta", "context_builder"):
         plan.append("context_builder")
 
@@ -149,7 +159,7 @@ def _run_supervisor_locked(
         plan.append("execution_engine")
 
     if "context_builder" in plan:
-        ran_workers["context_builder"] = _snapshot_worker_state(root, "context_builder")
+        ran_workers["context_builder"] = _snapshot_worker_dir(root, "context_builder")
         context_output = _run_worker_with_runtime(root, "context_builder", generated_at, config)
         worker_outputs.append(context_output)
         if _is_worker_timeout(context_output):
@@ -165,7 +175,7 @@ def _run_supervisor_locked(
             plan.append("execution_engine")
 
     if "execution_engine" in plan:
-        ran_workers["execution_engine"] = _snapshot_worker_state(root, "execution_engine")
+        ran_workers["execution_engine"] = _snapshot_worker_dir(root, "execution_engine")
         execution_output = _run_worker_with_runtime(root, "execution_engine", generated_at, config)
         worker_outputs.append(execution_output)
         if _is_worker_timeout(execution_output):
@@ -188,7 +198,8 @@ def _run_supervisor_locked(
     state["dirty"] = bool(plan)
     state["last_run_at"] = generated_at
     if status in {"complete", "blocked", "idle"}:
-        state["observed_deltas"] = sorted(observed.union(new_delta_refs))
+        state["observed_deltas"] = _archive_observed_deltas(root, sorted(observed.union(new_delta_refs)))
+        _prune_worker_consumed_inputs(root, set(state["observed_deltas"]))
     state["worker_states"].update(_worker_states(root, worker_outputs))
     state["recovery"] = _recovery_from_outputs(root, worker_outputs)
     state["runs"].append(
@@ -213,21 +224,31 @@ def _run_supervisor_locked(
     return result
 
 
-def _worker_state_path(root: Path, worker_id: str) -> Path:
-    return _resolve_under_root(root, f"cache/workers/{worker_id}/state.json")
+def _worker_dir(root: Path, worker_id: str) -> Path:
+    return _resolve_under_root(root, f"cache/workers/{worker_id}")
 
 
-def _snapshot_worker_state(root: Path, worker_id: str) -> str | None:
-    path = _worker_state_path(root, worker_id)
-    return path.read_text(encoding="utf-8") if path.exists() else None
+def _snapshot_worker_dir(root: Path, worker_id: str) -> dict[str, bytes] | None:
+    path = _worker_dir(root, worker_id)
+    if not path.exists():
+        return None
+    snapshot: dict[str, bytes] = {}
+    for child in path.rglob("*"):
+        if child.is_file() and not child.is_symlink():
+            snapshot[child.relative_to(path).as_posix()] = child.read_bytes()
+    return snapshot
 
 
-def _restore_worker_state(root: Path, worker_id: str, snapshot: str | None) -> None:
-    path = _worker_state_path(root, worker_id)
+def _restore_worker_dir(root: Path, worker_id: str, snapshot: dict[str, bytes] | None) -> None:
+    path = _worker_dir(root, worker_id)
+    if path.exists():
+        shutil.rmtree(path)
     if snapshot is None:
-        path.unlink(missing_ok=True)
-    else:
-        path.write_text(snapshot, encoding="utf-8")
+        return
+    for relative_path, content in snapshot.items():
+        target = path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
 
 
 def _is_worker_timeout(output: dict[str, Any]) -> bool:
@@ -243,12 +264,12 @@ def _blocked_with_rollback(
     reason: str,
     message: str,
     source_deltas: list[str],
-    ran_workers: dict[str, str | None],
+    ran_workers: dict[str, dict[str, bytes] | None],
 ) -> dict[str, Any]:
-    # Undo the state each ran worker already persisted so the exact same work
-    # is retried next run instead of the block silently clearing itself.
+    # Undo state and artifacts each ran worker already persisted so the audit
+    # trail matches the rolled-back world state.
     for worker_id, snapshot in ran_workers.items():
-        _restore_worker_state(root, worker_id, snapshot)
+        _restore_worker_dir(root, worker_id, snapshot)
     return _blocked(root, state, generated_at, reason, message, source_deltas)
 
 
@@ -300,6 +321,9 @@ def _blocked(
 
 
 def _default_world_state() -> dict[str, Any]:
+    # ponytail: registered_loops, dirty, and leases are reserved for daemon and
+    # multi-loop coordination; current one-shot supervisor behavior does not
+    # read them.
     return {
         "schema": WORLD_STATE_SCHEMA,
         "registered_loops": ["phase1", "context_builder", "execution_engine"],
@@ -333,6 +357,46 @@ def _read_config(root: Path) -> dict[str, Any]:
 def _phase1_delta_paths(root: Path) -> list[Path]:
     delta_dir = _resolve_under_root(root, "cache/deltas")
     return sorted(delta_dir.glob("*.json")) if delta_dir.exists() else []
+
+
+def _archive_observed_deltas(root: Path, observed_refs: list[str]) -> list[str]:
+    archive_dir = _resolve_under_root(root, "cache/deltas/archive")
+    active_refs: list[str] = []
+    for delta_ref in observed_refs:
+        delta_path = _resolve_under_root(root, delta_ref)
+        if not delta_path.exists():
+            continue
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            archive_path = _unique_archive_path(archive_dir / delta_path.name)
+            delta_path.replace(archive_path)
+        except OSError:
+            active_refs.append(delta_ref)
+    return active_refs
+
+
+def _unique_archive_path(path: Path) -> Path:
+    candidate = path
+    suffix = 2
+    # Keep the .json extension on collision renames so archive globs and the
+    # delta's embedded delta_path stay meaningful.
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{suffix}{path.suffix}")
+        suffix += 1
+    return candidate
+
+
+def _prune_worker_consumed_inputs(root: Path, active_delta_refs: set[str]) -> None:
+    state_path = _resolve_under_root(root, "cache/workers/context_builder/state.json")
+    if not state_path.exists():
+        return
+    state = _read_json(state_path)
+    state["consumed_inputs"] = [
+        delta_ref
+        for delta_ref in state.get("consumed_inputs", [])
+        if delta_ref in active_delta_refs
+    ]
+    _write_json(state_path, state)
 
 
 def _can_route(config: dict[str, Any], source: str, target: str) -> bool:
@@ -412,10 +476,16 @@ def _run_worker_with_runtime(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     started = time.monotonic()
-    output = run_worker(root, worker_id, now=generated_at)
+    max_runtime = float(config.get("max_worker_runtime_seconds", DEFAULT_CONFIG["max_worker_runtime_seconds"]))
+    model_timeout = max(max_runtime, 0.001)
+    output = run_worker(
+        root,
+        worker_id,
+        now=generated_at,
+        model_timeout_seconds=model_timeout,
+    )
     runtime_seconds = time.monotonic() - started
     output["runtime_seconds"] = round(runtime_seconds, 6)
-    max_runtime = float(config.get("max_worker_runtime_seconds", DEFAULT_CONFIG["max_worker_runtime_seconds"]))
     if runtime_seconds > max_runtime:
         output["status"] = "blocked"
         output["errors"] = [
@@ -508,13 +578,17 @@ def _write_lock_exclusive(lock_path: Path, generated_at: str) -> None:
         )
 
 
+def _release_lock(lock_path: Path, expected_pid: int) -> None:
+    try:
+        lock = _read_json(lock_path)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return
+    if lock.get("pid") == expected_pid:
+        lock_path.unlink(missing_ok=True)
+
+
 def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def main() -> int:
@@ -527,6 +601,8 @@ def main() -> int:
     if args.status:
         print(status_summary(args.root))
         return 0
+    if not args.once:
+        parser.error("pass --once to run a supervisor pass, or --status to inspect state")
     result = run_supervisor(args.root)
     print(f"status: {result['status']}")
     print(f"plan: {', '.join(result['plan']) if result['plan'] else 'none'}")

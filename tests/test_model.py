@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-_ENV_VARS = ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "MODEL_EXECUTION_ENGINE", "MODEL_VERIFIER")
+_ENV_VARS = (
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_BASE_URL",
+    "MODEL_CONTEXT_BUILDER",
+    "MODEL_EXECUTION_ENGINE",
+    "MODEL_VERIFIER",
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -16,9 +22,10 @@ from looping_box.worker import run_worker
 
 
 def _fake_transport(content: str):
-    def transport(url, headers, body):
+    def transport(url, headers, body, timeout):
         assert url.endswith("/chat/completions")
         assert headers["Authorization"].startswith("Bearer ")
+        assert timeout > 0
         sent = json.loads(body)
         assert sent["model"]  # a model id was selected for the role
         return json.dumps({"model": sent["model"], "choices": [{"message": {"content": content}}]})
@@ -88,6 +95,134 @@ class ModelLayerTests(unittest.TestCase):
         self.assertEqual(item["model"], "vendor/model-1")
         self.assertIn("response_sha256", item)
 
+    def test_worker_model_calls_use_configured_timeout(self):
+        self._seed_offline_context()
+        self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_EXECUTION_ENGINE=vendor/model-1\n")
+        model._env_loaded_for.clear()
+        seen_timeouts = []
+
+        def recording_transport(url, headers, body, timeout):
+            seen_timeouts.append(timeout)
+            sent = json.loads(body)
+            return json.dumps({"model": sent["model"], "choices": [{"message": {"content": "MODEL DRAFT"}}]})
+
+        model._transport = recording_transport
+
+        out = run_worker(
+            self.root,
+            "execution_engine",
+            now="2026-06-24T12:02:00Z",
+            model_timeout_seconds=7.5,
+        )
+
+        self.assertEqual(out["status"], "complete")
+        self.assertEqual(seen_timeouts, [7.5])
+
+    def test_execution_engine_batches_multiple_model_drafts(self):
+        (self.root / "config" / "sops").mkdir(parents=True)
+        (self.root / "inbox").mkdir()
+        (self.root / "config" / "sops" / "phase1_ingestion.json").write_text(
+            json.dumps(
+                {
+                    "name": "t",
+                    "allowed_extensions": [".txt"],
+                    "routes": [{"label": "docs", "keywords": ["docs"]}],
+                    "boundary_gate": {"requires_review_keywords": [], "notification_message": "x"},
+                }
+            )
+        )
+        (self.root / "inbox" / "a.txt").write_text("docs: a", encoding="utf-8")
+        (self.root / "inbox" / "b.txt").write_text("docs: b", encoding="utf-8")
+        self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_EXECUTION_ENGINE=vendor/model-1\n")
+        model._env_loaded_for.clear()
+        calls = []
+
+        def batched_transport(url, headers, body, timeout):
+            calls.append(json.loads(body)["messages"][-1]["content"])
+            return json.dumps(
+                {
+                    "model": "vendor/model-1",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "drafts": [
+                                            {"relative_path": "inbox/a.txt", "draft": "Draft A"},
+                                            {"relative_path": "inbox/b.txt", "draft": "Draft B"},
+                                        ]
+                                    }
+                                )
+                            }
+                        }
+                    ],
+                }
+            )
+
+        model._transport = batched_transport
+        run_phase1(self.root, now="2026-06-24T12:00:00Z")
+        run_worker(self.root, "context_builder", now="2026-06-24T12:00:01Z")
+        out = run_worker(self.root, "execution_engine", now="2026-06-24T12:00:02Z")
+
+        self.assertEqual(out["status"], "complete")
+        self.assertEqual(len(calls), 1)
+        draft = json.loads((self.root / "cache" / "workers" / "execution_engine" / "draft.json").read_text())
+        self.assertEqual([item["draft"] for item in draft["items"]], ["Draft A", "Draft B"])
+
+    def test_context_builder_skips_model_when_package_is_blocked(self):
+        (self.root / "config" / "sops").mkdir(parents=True)
+        (self.root / "inbox").mkdir()
+        (self.root / "config" / "sops" / "phase1_ingestion.json").write_text(
+            json.dumps(
+                {
+                    "name": "t",
+                    "allowed_extensions": [".txt"],
+                    "routes": [{"label": "docs", "keywords": ["docs"]}],
+                    "boundary_gate": {"requires_review_keywords": ["deploy"], "notification_message": "x"},
+                }
+            )
+        )
+        (self.root / "inbox" / "safe.txt").write_text("docs: a note", encoding="utf-8")
+        (self.root / "inbox" / "blocked.txt").write_text("docs: please deploy", encoding="utf-8")
+        self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_CONTEXT_BUILDER=vendor/model-1\n")
+        model._env_loaded_for.clear()
+
+        def exploding(url, headers, body, timeout):
+            raise AssertionError("blocked context packages must not call the model")
+
+        model._transport = exploding
+        run_phase1(self.root, now="2026-06-24T12:00:00Z")
+        out = run_worker(self.root, "context_builder", now="2026-06-24T12:00:01Z")
+
+        self.assertEqual(out["status"], "blocked")
+
+    def test_context_builder_markdown_includes_model_synthesis(self):
+        (self.root / "config" / "sops").mkdir(parents=True)
+        (self.root / "inbox").mkdir()
+        (self.root / "config" / "sops" / "phase1_ingestion.json").write_text(
+            json.dumps(
+                {
+                    "name": "t",
+                    "allowed_extensions": [".txt"],
+                    "routes": [{"label": "docs", "keywords": ["docs"]}],
+                    "boundary_gate": {"requires_review_keywords": [], "notification_message": "x"},
+                }
+            )
+        )
+        (self.root / "inbox" / "note.txt").write_text("docs: a note", encoding="utf-8")
+        self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_CONTEXT_BUILDER=vendor/model-1\n")
+        model._env_loaded_for.clear()
+        model._transport = _fake_transport("MODEL SYNTHESIS")
+
+        run_phase1(self.root, now="2026-06-24T12:00:00Z")
+        out = run_worker(self.root, "context_builder", now="2026-06-24T12:00:01Z")
+
+        self.assertEqual(out["status"], "complete")
+        markdown = (self.root / "cache" / "workers" / "context_builder" / "context_package.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("MODEL SYNTHESIS", markdown)
+
     def _seed_offline_context(self):
         """Phase 1 + context_builder + execution_engine with no model configured."""
         (self.root / "config" / "sops").mkdir(parents=True)
@@ -111,7 +246,7 @@ class ModelLayerTests(unittest.TestCase):
         self._seed_offline_context()
         self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_EXECUTION_ENGINE=vendor/model-1\n")
 
-        def exploding(url, headers, body):
+        def exploding(url, headers, body, timeout):
             raise AssertionError("dry run must not call the model")
 
         model._transport = exploding
@@ -139,7 +274,7 @@ class ModelLayerTests(unittest.TestCase):
         self._write_env("OPENROUTER_API_KEY=sk-test\nMODEL_EXECUTION_ENGINE=vendor/model-1\n")
         model._env_loaded_for.clear()
 
-        def failing(url, headers, body):
+        def failing(url, headers, body, timeout):
             raise RuntimeError("openrouter is down")
 
         model._transport = failing
@@ -173,7 +308,7 @@ class ModelLayerTests(unittest.TestCase):
         os.environ["MODEL_VERIFIER"] = "vendor/judge"
         model._env_loaded_for.clear()
 
-        def failing(url, headers, body):
+        def failing(url, headers, body, timeout):
             raise RuntimeError("judge unreachable")
 
         model._transport = failing

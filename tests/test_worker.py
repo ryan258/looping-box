@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from looping_box.phase1 import run_phase1
-from looping_box.worker import run_worker
+from looping_box.worker import _strip_code_fences, run_worker
 
 
 def _make_sop(root: Path) -> None:
@@ -52,6 +52,31 @@ class WorkerTests(unittest.TestCase):
             second = run_worker(root, "context_builder", now="2026-06-24T12:02:00Z")
             self.assertEqual(second["status"], "idle")
             self.assertEqual(second["inputs"]["source_deltas"], [])
+
+    def test_strip_code_fences_tolerates_fenced_model_json(self):
+        bare = '{"drafts": []}'
+        self.assertEqual(_strip_code_fences(bare), bare)
+        self.assertEqual(_strip_code_fences(f"```json\n{bare}\n```"), bare)
+        self.assertEqual(_strip_code_fences(f"```\n{bare}\n```\n"), bare)
+
+    def test_context_builder_quarantines_malformed_delta_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            delta_dir = root / "cache" / "deltas"
+            delta_dir.mkdir(parents=True)
+            bad_delta = delta_dir / "bad.json"
+            bad_delta.write_text("{not-json", encoding="utf-8")
+            (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
+            good = run_phase1(root, now="2026-06-24T12:00:00Z")
+
+            result = run_worker(root, "context_builder", now="2026-06-24T12:01:00Z")
+
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(result["inputs"]["source_deltas"], [good["delta_path"]])
+            self.assertTrue((delta_dir / "bad.json.bad").exists())
+            self.assertFalse(bad_delta.exists())
+            self.assertEqual(result["errors"][0]["code"], "malformed_delta_quarantined")
 
     def test_context_builder_keeps_boundary_gated_inputs_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:

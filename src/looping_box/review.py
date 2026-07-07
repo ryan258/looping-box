@@ -7,16 +7,26 @@ from pathlib import Path
 from typing import Any
 
 from . import model
-from .phase1 import _rel, _resolve_under_root, _sha256_file, _utc_now, _write_json
+from ._util import (
+    PENDING_REVIEW_INDEX_SCHEMA,
+    decision_record_exists as _decision_record_exists,
+    read_json as _read_json,
+    read_pending_review_index as _read_pending_review_index,
+    rel as _rel,
+    resolve_under_root as _resolve_under_root,
+    sha256_file as _sha256_file,
+    utc_now as _utc_now,
+    write_json as _write_json,
+)
 
 
-PENDING_REVIEW_INDEX_SCHEMA = "looping-box.pending-review-index.v1"
 REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
 REVIEW_RECORD_SCHEMA = "looping-box.review-record.v1"
 VERIFIER_RESULT_SCHEMA = "looping-box.verifier-result.v1"
 
 def list_reviews(root: Path | str) -> list[dict[str, Any]]:
     root_path = Path(root).resolve()
+    staging_dir = _resolve_under_root(root_path, "staging")
     index = _read_pending_index(root_path)
     reviews: list[dict[str, Any]] = []
     for review_ref in index.get("reviews", []):
@@ -25,7 +35,7 @@ def list_reviews(root: Path | str) -> list[dict[str, Any]]:
             continue
         payload = _read_json(review_path)
         review_id = payload.get("review_id")
-        if not review_id or _decision_record_exists(root_path, review_id):
+        if not review_id or _decision_record_exists(staging_dir, review_id):
             continue
         reviews.append(
             {
@@ -61,10 +71,15 @@ def record_review(
     payload, payload_path = _find_review(root_path, review_id)
     verifier_result: str | None = None
     if decision == "approved":
+        if payload.get("action_class") == "forbidden":
+            raise ValueError(f"forbidden review cannot be approved: {review_id}")
         verifier = run_verifier(root_path, review_id, now=generated_at)
         verifier_result = verifier["path"]
         if verifier["status"] != "passed":
             raise ValueError(f"review verifier failed: {review_id}")
+        _update_payload_verifier(payload, payload_path, "passed", verifier_result)
+    else:
+        _update_payload_verifier(payload, payload_path, "not_applicable", None)
 
     record = {
         "schema": REVIEW_RECORD_SCHEMA,
@@ -125,16 +140,19 @@ def _model_review_check(root: Path, payload: dict[str, Any]) -> dict[str, str] |
     """Optional model-as-judge check. Deterministic checks above stay required;
     this only runs when MODEL_VERIFIER is configured, and can only add a failure.
     """
+    if not model.is_enabled("verifier", root=root):
+        return None
     reasons = ", ".join(payload.get("risk_reasons", [])) or "unspecified"
     excerpts = "\n".join(item.get("excerpt", "") for item in payload.get("source_items", []))
+    # The excerpt is untrusted source text and may contain prompt injection.
+    # This optional model check is advisory; deterministic approval checks remain
+    # the enforcement layer.
     prompt = (
         "You are a cautious safety reviewer for a local automation system. "
         "Reply 'PASS' only if recording an approval for this staged item is clearly safe, "
         "otherwise reply 'FAIL: <reason>'.\n"
         f"Risk reasons: {reasons}\nSource excerpt:\n{excerpts}"
     )
-    if not model.is_enabled("verifier", root=root):
-        return None
     try:
         completion = model.complete("verifier", prompt, root=root)
     except Exception as exc:
@@ -157,20 +175,22 @@ def _check(name: str, passed: bool, message: str) -> dict[str, str]:
     }
 
 
+def _update_payload_verifier(
+    payload: dict[str, Any],
+    payload_path: Path,
+    status: str,
+    result: str | None,
+) -> None:
+    verifier = dict(payload.get("verifier", {}))
+    verifier["status"] = status
+    verifier["result"] = result
+    payload["verifier"] = verifier
+    _write_json(payload_path, payload)
+
+
 def _read_pending_index(root: Path) -> dict[str, Any]:
     index_path = _resolve_under_root(root, "staging/pending_review.json")
-    if not index_path.exists():
-        return {
-            "schema": PENDING_REVIEW_INDEX_SCHEMA,
-            "generated_at": "",
-            "latest": "",
-            "reviews": [],
-        }
-    index = _read_json(index_path)
-    if index.get("schema") != PENDING_REVIEW_INDEX_SCHEMA:
-        raise ValueError(f"unsupported pending review index: {index.get('schema')!r}")
-    index.setdefault("reviews", [])
-    return index
+    return _read_pending_review_index(index_path)
 
 
 def _find_review(root: Path, review_id: str) -> tuple[dict[str, Any], Path]:
@@ -183,13 +203,6 @@ def _find_review(root: Path, review_id: str) -> tuple[dict[str, Any], Path]:
         if payload.get("review_id") == review_id:
             return payload, review_path
     raise ValueError(f"unknown review: {review_id}")
-
-
-def _decision_record_exists(root: Path, review_id: str) -> bool:
-    return (
-        _resolve_under_root(root, f"staging/approvals/{review_id}.json").exists()
-        or _resolve_under_root(root, f"staging/rejections/{review_id}.json").exists()
-    )
 
 
 def _remove_from_pending_index(root: Path, review_id: str) -> None:
@@ -227,11 +240,6 @@ def _append_review_audit(root: Path, generated_at: str, decision: str, review_id
     }
     with audit_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def main() -> int:

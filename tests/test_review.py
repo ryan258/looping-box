@@ -87,6 +87,32 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(index["reviews"], [])
             self.assertEqual(index["latest"], "")
 
+    def test_review_decision_does_not_suppress_identical_content_at_new_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "inbox" / "release.txt").write_text("please deploy", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:00:00Z")
+            review = list_reviews(root)[0]
+            record_review(
+                root,
+                review["review_id"],
+                "rejected",
+                note="Not allowed here",
+                now="2026-06-24T12:05:00Z",
+            )
+            run_phase1(root, now="2026-06-24T12:10:00Z")
+
+            (root / "inbox" / "release-copy.txt").write_text("please deploy", encoding="utf-8")
+            result = run_phase1(root, now="2026-06-24T12:15:00Z")
+
+            self.assertEqual(result["boundary_gate"]["status"], "pending_review")
+            self.assertEqual(result["summary"]["changed"], 1)
+            self.assertEqual(result["changes"][0]["relative_path"], "inbox/release-copy.txt")
+            new_review = list_reviews(root)[0]
+            self.assertNotEqual(new_review["review_id"], review["review_id"])
+            self.assertEqual(new_review["risk_reasons"], ["deploy"])
+
     def test_phase1_uses_action_class_config_for_review_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -113,6 +139,41 @@ class ReviewTests(unittest.TestCase):
             review = list_reviews(root)[0]
             self.assertEqual(review["action_class"], "blocked")
 
+    def test_forbidden_action_class_cannot_be_approved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "config" / "action_classes.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "looping-box.action-classes.v1",
+                        "default_class": "review_required",
+                        "classes": {
+                            "safe_local_transform": [],
+                            "review_required": [],
+                            "blocked": [],
+                            "forbidden": ["deploy"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "inbox" / "release.txt").write_text("please deploy", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:00:00Z")
+            review = list_reviews(root)[0]
+
+            with self.assertRaises(ValueError):
+                record_review(
+                    root,
+                    review["review_id"],
+                    "approved",
+                    note="Should not approve",
+                    now="2026-06-24T12:05:00Z",
+                )
+
+            self.assertFalse((root / "staging" / "approvals" / f"{review['review_id']}.json").exists())
+            self.assertEqual(list_reviews(root)[0]["review_id"], review["review_id"])
+
     def test_review_records_approval_with_verifier_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -120,6 +181,7 @@ class ReviewTests(unittest.TestCase):
             (root / "inbox" / "release.txt").write_text("please deploy", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
             review = list_reviews(root)[0]
+            review_path = root / review["path"]
 
             record = record_review(
                 root,
@@ -135,6 +197,9 @@ class ReviewTests(unittest.TestCase):
             validate(record, REVIEW_RECORD_SCHEMA)
             verifier_result = json.loads((root / record["verifier_result"]).read_text())
             validate(verifier_result, VERIFIER_RESULT_SCHEMA)
+            payload = json.loads(review_path.read_text())
+            self.assertEqual(payload["verifier"]["status"], "passed")
+            self.assertEqual(payload["verifier"]["result"], record["verifier_result"])
 
     def test_review_records_rejection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,6 +208,7 @@ class ReviewTests(unittest.TestCase):
             (root / "inbox" / "release.txt").write_text("please deploy", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
             review = list_reviews(root)[0]
+            review_path = root / review["path"]
 
             record = record_review(
                 root,
@@ -154,11 +220,25 @@ class ReviewTests(unittest.TestCase):
 
             self.assertEqual(record["decision"], "rejected")
             self.assertTrue((root / "staging" / "rejections" / f"{review['review_id']}.json").exists())
+            payload = json.loads(review_path.read_text())
+            self.assertEqual(payload["verifier"]["status"], "not_applicable")
+            self.assertIsNone(payload["verifier"]["result"])
 
     def test_unknown_action_defaults_to_review_required(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.assertEqual(classify_action(root, "surprising-action"), "review_required")
+
+    def test_review_list_tolerates_unsupported_pending_index_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "staging").mkdir()
+            (root / "staging" / "pending_review.json").write_text(
+                json.dumps({"schema": "wrong", "reviews": ["staging/reviews/x.json"]}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(list_reviews(root), [])
 
 
 if __name__ == "__main__":

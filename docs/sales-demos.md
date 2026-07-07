@@ -91,7 +91,7 @@ slam the brakes.
 4. Show the waiting items:
 
    ```sh
-   PYTHONPATH=src python3 -m looping_box.review list
+   looping-box-review list
    ```
 
    It lists the held item, marked `review_required`.
@@ -110,19 +110,19 @@ considered handled.
 1. List the pending item again and copy its ID (the `review-...` value):
 
    ```sh
-   PYTHONPATH=src python3 -m looping_box.review list
+   looping-box-review list
    ```
 
 2. Read the full details of what's being asked:
 
    ```sh
-   PYTHONPATH=src python3 -m looping_box.review show <paste-the-id>
+   looping-box-review show <paste-the-id>
    ```
 
 3. Approve it, with a note for the record:
 
    ```sh
-   PYTHONPATH=src python3 -m looping_box.review approve <paste-the-id> --note "Checked with the team, good to go"
+   looping-box-review approve <paste-the-id> --note "Checked with the team, good to go"
    ```
 
 4. Run the loop one more time:

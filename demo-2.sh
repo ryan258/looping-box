@@ -6,7 +6,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
-export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "DEMO 2: Risky work is BLOCKED until a human approves it."
 echo "------------------------------------------------------------"
@@ -22,7 +21,7 @@ echo "------------------------------------------------------------"
 echo "It stopped at the BOUNDARY GATE. It will NOT deploy or send on its own."
 echo "Here is what is now waiting for a human decision:"
 echo
-python3 -m looping_box.review list
+looping-box-review list
 
 echo
 echo "------------------------------------------------------------"

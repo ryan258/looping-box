@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "looping-box"
+version = "0.1.0"
+requires-python = ">=3.9"
+
+[project.scripts]
+looping-box-phase1 = "looping_box.phase1:main"
+looping-box-worker = "looping_box.worker:main"
+looping-box-supervisor = "looping_box.supervisor:main"
+looping-box-review = "looping_box.review:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

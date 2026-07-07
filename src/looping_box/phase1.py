@@ -3,18 +3,26 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._util import (
+    PENDING_REVIEW_INDEX_SCHEMA,
+    decision_record_exists as _decision_record_exists,
+    read_json as _read_json,
+    read_pending_review_index as _read_pending_review_index,
+    rel as _rel,
+    resolve_under_root as _resolve_under_root,
+    sha256_file as _sha256_file,
+    utc_now as _utc_now,
+    write_json as _write_json,
+)
 from .action_policy import classify_reasons
 
 
 STATE_SCHEMA = "looping-box.phase1.state.v1"
 DELTA_SCHEMA = "looping-box.phase1.delta.v1"
 BOUNDARY_SCHEMA = "looping-box.boundary-review.v1"
-PENDING_REVIEW_INDEX_SCHEMA = "looping-box.pending-review-index.v1"
 REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
 
 
@@ -62,16 +70,6 @@ def run_phase1(
         content_hash = _sha256_file(file_path)
         file_stat = file_path.stat()
 
-        if _has_processed(state, relative_path, content_hash):
-            skipped.append(
-                {
-                    "relative_path": relative_path,
-                    "sha256": content_hash,
-                    "reason": "already_processed",
-                }
-            )
-            continue
-
         text = file_path.read_text(encoding="utf-8", errors="replace")
         matched_routes = _match_routes(text, sop.get("routes", []))
         review_reasons = _match_keywords(
@@ -110,6 +108,16 @@ def run_phase1(
             # staging payload) every run until a human handles/removes it.
             continue
 
+        if _has_processed(state, relative_path, content_hash):
+            skipped.append(
+                {
+                    "relative_path": relative_path,
+                    "sha256": content_hash,
+                    "reason": "already_processed",
+                }
+            )
+            continue
+
         changes.append(change)
         _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
 
@@ -122,6 +130,13 @@ def run_phase1(
         review_items,
     )
 
+    summary = {
+        "scanned": len(changes) + len(skipped),
+        "changed": len(changes),
+        "skipped": len(skipped),
+        "requires_review": bool(review_items),
+    }
+    should_write_delta = summary["scanned"] > 0
     run_id = _unique_run_id(resolved_delta_dir, _run_id(generated_at))
     delta = {
         "schema": DELTA_SCHEMA,
@@ -136,20 +151,18 @@ def run_phase1(
             "root": str(root_path),
             "input_dir": _rel(root_path, resolved_input_dir),
         },
-        "summary": {
-            "scanned": len(changes) + len(skipped),
-            "changed": len(changes),
-            "skipped": len(skipped),
-            "requires_review": bool(review_items),
-        },
+        "summary": summary,
         "changes": changes,
         "skipped": skipped,
         "boundary_gate": boundary_gate,
     }
 
-    delta_path = resolved_delta_dir / f"{run_id}.json"
-    delta["delta_path"] = _rel(root_path, delta_path)
-    _write_json(delta_path, delta)
+    if should_write_delta:
+        delta_path = resolved_delta_dir / f"{run_id}.json"
+        delta["delta_path"] = _rel(root_path, delta_path)
+        _write_json(delta_path, delta)
+    else:
+        delta["delta_path"] = None
 
     _record_run(state, generated_at, delta["delta_path"], delta["summary"])
     _write_json(resolved_state_path, state)
@@ -157,24 +170,9 @@ def run_phase1(
     return delta
 
 
-def _resolve_under_root(root: Path, value: Path | str) -> Path:
-    path = Path(value)
-    candidate = (path if path.is_absolute() else root / path).resolve()
-    # The repo boundary is part of the safety model: refuse to read or write
-    # outside root (incl. via absolute paths or `..` traversal). Fail closed.
-    if candidate != root and root not in candidate.parents:
-        raise ValueError(f"path escapes project root: {value!r} -> {candidate}")
-    return candidate
-
-
 def _ensure_layout(*directories: Path) -> None:
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def _read_state(path: Path) -> dict[str, Any]:
@@ -201,28 +199,21 @@ def _iter_input_files(
 
     files: list[Path] = []
     for path in input_dir.rglob("*"):
+        if path.is_symlink():
+            continue
         if not path.is_file():
             continue
         if any(part.startswith(".") for part in path.relative_to(input_dir).parts):
             continue
         if path.suffix.lower() not in allowed_extensions:
             continue
-        # is_file()/read/hash all follow symlinks, so a symlink inside the input
-        # dir can point outside the repo. Skip any file whose real target escapes
-        # the boundary. Fail-closed, consistent with _resolve_under_root.
+        # read/hash can still race with filesystem changes; keep the resolved
+        # target inside the root as a final containment check.
         real = path.resolve()
         if real != root and root not in real.parents:
             continue
         files.append(path)
     return sorted(files)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _has_processed(state: dict[str, Any], relative_path: str, content_hash: str) -> bool:
@@ -259,7 +250,7 @@ def _record_processed(
 def _record_run(
     state: dict[str, Any],
     generated_at: str,
-    delta_path: str,
+    delta_path: str | None,
     summary: dict[str, Any],
 ) -> None:
     state["last_run_at"] = generated_at
@@ -388,42 +379,6 @@ def _build_boundary_gate(
     }
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f"{path.name}.tmp")
-    temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temp_path.replace(path)
-
-
-def _read_pending_review_index(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {
-            "schema": PENDING_REVIEW_INDEX_SCHEMA,
-            "generated_at": "",
-            "latest": "",
-            "reviews": [],
-        }
-    try:
-        index = _read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {
-            "schema": PENDING_REVIEW_INDEX_SCHEMA,
-            "generated_at": "",
-            "latest": "",
-            "reviews": [],
-        }
-    if index.get("schema") != PENDING_REVIEW_INDEX_SCHEMA:
-        return {
-            "schema": PENDING_REVIEW_INDEX_SCHEMA,
-            "generated_at": "",
-            "latest": "",
-            "reviews": [],
-        }
-    index.setdefault("reviews", [])
-    index.setdefault("latest", "")
-    return index
-
-
 def _review_id(review_items: list[dict[str, Any]]) -> str:
     basis = json.dumps(
         {
@@ -440,13 +395,6 @@ def _review_id(review_items: list[dict[str, Any]]) -> str:
     )
     digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
     return f"review-{digest}"
-
-
-def _decision_record_exists(staging_dir: Path, review_id: str) -> bool:
-    return (
-        (staging_dir / "approvals" / f"{review_id}.json").exists()
-        or (staging_dir / "rejections" / f"{review_id}.json").exists()
-    )
 
 
 def _active_review_refs(root: Path, staging_dir: Path, review_refs: list[str]) -> list[str]:
@@ -468,13 +416,6 @@ def _active_review_refs(root: Path, staging_dir: Path, review_refs: list[str]) -
     return active
 
 
-def _rel(root: Path, path: Path) -> str:
-    # Callers pass containment-checked paths (config via _resolve_under_root,
-    # discovered files via _iter_input_files), so this is always under root;
-    # relpath just gives a stable posix-style relative string.
-    return Path(os.path.relpath(path, root)).as_posix()
-
-
 def _run_id(generated_at: str) -> str:
     return "phase1-delta-" + "".join(character for character in generated_at if character.isalnum())
 
@@ -482,14 +423,15 @@ def _run_id(generated_at: str) -> str:
 def _unique_run_id(delta_dir: Path, base: str) -> str:
     run_id = base
     suffix = 2
-    while (delta_dir / f"{run_id}.json").exists():
+    # The supervisor archives observed deltas out of delta_dir, so check the
+    # archive too, or a same-second run after archiving would reuse an existing
+    # run id and make the audit trail ambiguous.
+    while (delta_dir / f"{run_id}.json").exists() or (
+        delta_dir / "archive" / f"{run_id}.json"
+    ).exists():
         run_id = f"{base}-{suffix}"
         suffix += 1
     return run_id
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def main() -> int:
@@ -519,7 +461,7 @@ def main() -> int:
         staging_dir=args.staging_dir,
     )
 
-    print(f"delta: {delta['delta_path']}")
+    print(f"delta: {delta['delta_path'] or 'none'}")
     print(
         "summary: "
         f"{delta['summary']['changed']} changed, "
