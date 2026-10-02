@@ -1,21 +1,18 @@
 # Looping Box Demos
 
 These demos are designed to be run from the repository root. They exercise the
-Phase 1 local ingestion loop through the file system only.
+Phase 1 ingestion loop through the file system only. `./startday.sh` also runs one
+supervisor pass, which archives observed deltas, so the helper below looks in
+`cache/deltas/archive/` too. For hands-off, repeatable runs use `./demo-1.sh` ..
+`./demo-3.sh`, which work in a throwaway workspace.
 
-Runtime outputs are ignored by git:
-
-- `cache/state/phase1_state.json`
-- `cache/deltas/*.json`
-- `cache/workers/**/*.json`
-- `cache/verifiers/*.json`
-- `staging/pending_review.json`
-- `staging/reviews/*.json`
+Runtime outputs (state, deltas, worker output, verifier results, staging records,
+logs) and everything in `inbox/` except `.gitkeep` are ignored by git.
 
 Use this helper after any run to inspect the newest delta:
 
 ```sh
-latest="$(ls -t cache/deltas/*.json | head -1)"
+latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
 python3 -m json.tool "$latest"
 ```
 
@@ -23,17 +20,13 @@ To reset all demo runtime state:
 
 ```sh
 find inbox -maxdepth 1 -type f -name 'demo-*' -delete
-find cache/deltas -maxdepth 1 -type f -name '*.json' -delete
-find cache/workers -type f \( -name '*.json' -o -name '*.md' \) -delete
-find cache/verifiers -maxdepth 1 -type f -name '*.json' -delete
-find staging/reviews -maxdepth 1 -type f -name '*.json' -delete
-rm -f cache/state/phase1_state.json staging/pending_review.json .world_state.json
+find cache logs staging -type f ! -name .gitkeep -delete
+rm -f .world_state.json .looping_box.lock
 ```
 
 ## Demo 1: Run an Empty Inbox Pass
 
-Goal: Confirm the loop can run with no inputs and still writes a structured
-delta.
+Goal: Confirm the loop can run with no inputs and stops cleanly.
 
 Steps:
 
@@ -41,11 +34,8 @@ Steps:
 
    ```sh
    find inbox -maxdepth 1 -type f -name 'demo-*' -delete
-   find cache/deltas -maxdepth 1 -type f -name '*.json' -delete
-   find cache/workers -type f \( -name '*.json' -o -name '*.md' \) -delete
-   find cache/verifiers -maxdepth 1 -type f -name '*.json' -delete
-   find staging/reviews -maxdepth 1 -type f -name '*.json' -delete
-   rm -f cache/state/phase1_state.json staging/pending_review.json .world_state.json
+   find cache logs staging -type f ! -name .gitkeep -delete
+   rm -f .world_state.json .looping_box.lock
    ```
 
 2. Run the loop:
@@ -57,12 +47,13 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
-Expected result: the terminal prints `0 changed, 0 skipped, review=clear`, and
-the delta summary shows `"changed": 0`.
+Expected result: the terminal prints `delta: none` and
+`0 changed, 0 skipped, review=clear`. An empty scan writes no delta file, so skip
+step 3 for this demo.
 
 ## Demo 2: Ingest a Documentation Note
 
@@ -85,7 +76,7 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -113,7 +104,7 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -142,7 +133,7 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -170,7 +161,7 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -198,7 +189,7 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -215,11 +206,8 @@ Steps:
 
    ```sh
    find inbox -maxdepth 1 -type f -name 'demo-*' -delete
-   find cache/deltas -maxdepth 1 -type f -name '*.json' -delete
-   find cache/workers -type f \( -name '*.json' -o -name '*.md' \) -delete
-   find cache/verifiers -maxdepth 1 -type f -name '*.json' -delete
-   find staging/reviews -maxdepth 1 -type f -name '*.json' -delete
-   rm -f cache/state/phase1_state.json staging/pending_review.json .world_state.json
+   find cache logs staging -type f ! -name .gitkeep -delete
+   rm -f .world_state.json .looping_box.lock
    ```
 
 2. Create one input:
@@ -238,7 +226,7 @@ Steps:
 4. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -267,7 +255,7 @@ Steps:
 3. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 
@@ -304,7 +292,7 @@ Steps:
 4. Inspect the newest delta:
 
    ```sh
-   latest="$(ls -t cache/deltas/*.json | head -1)"
+   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
    python3 -m json.tool "$latest"
    ```
 

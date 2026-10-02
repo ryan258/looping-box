@@ -1,36 +1,32 @@
-# Code Review — Looping Box
+# Review — open items
 
-Reviewed: 2026-06-24 (phase1 only), extended 2026-07-03 (full repo: phase1,
-worker, supervisor, review, model, action_policy, schema, config, docs).
+Living list of what is still open. Resolved history: `CHANGELOG.md` and
+`docs/history/`. Feature ideas: `ROADMAP.md`. Trust model: `docs/THREAT-MODEL.md`.
 
-Overall: small, deterministic, well-factored. Atomic writes, content-hash
-dedup, the file-system-as-boundary model, and the review/verifier flow are
-all sound. Fixed items are recorded in `CHANGELOG.md` (Unreleased → Fixed).
-What remains below is open or left by design.
+Last full review: 2026-10-02 (all code, docs, and demos; reproduced defects fixed in
+the Unreleased changelog entry).
 
-## Medium — substring keyword matching
+## Open by design
 
-`_match_keywords` uses `in`, not word boundaries. "send" matches
-"sender"/"resend", "remove" matches "removed". Kept as-is by design: for a
-safety gate, substring keeps recall high ("deploy" catches "deployment",
-"credential" catches "credentials"), and word boundaries would *reduce*
-recall. This is the intended ceiling; revisit only if false-positive review
-fatigue becomes a problem.
+- **Keyword gate is a tripwire.** Matching is normalized and whole-word, but it only
+  knows its list. Next step if review fatigue or misses show up: a model classifier
+  that can only *raise* severity (ROADMAP).
+- **Same-user attacker** can read the signing key, set the non-interactive override,
+  or rewrite logs (THREAT-MODEL).
+- **Model verifier is advisory**; deterministic verifier checks prove payload integrity only.
+- **Unbounded phase 1 state.** `processed_files` / `processed_hashes` grow forever (runs are capped).
+- **Malformed SOP fails loudly** by design.
+- **Drafts only see 500-char excerpts** (`max_excerpt_chars`); full-content processing is on the ROADMAP.
 
-## Low — unbounded state growth
+## Open, small
 
-`runs` is capped at 50, but `processed_files` and `processed_hashes` grow
-forever. Fine for a local Phase 1 inbox; flag it before this scales.
+- `supervisor --once` exits 0 even when blocked; consider `2` for "operator action required".
+- Phase 1 hashes then reads a file; a change in between is only caught on the next run.
+- A wider SOP keyword list re-gates previously processed files (the gate runs before dedup).
+  Fail-closed, but note it when upgrading the SOP.
+- No tests yet for the interactive approve prompt, `startday.sh`, or the demo scripts.
 
-## Low — a single blocked item holds up the whole worker batch
-
-`context_builder` sets the entire context package `status: "blocked"` when
-*any* item in the batch has review reasons, and `execution_engine` refuses to
-draft anything at all while that status is `blocked` — even the items with no
-review reasons. Tested and intentional (fail-closed), but worth knowing:
-one flagged file in an inbox of ten stalls drafting for the other nine until
-the flagged one is resolved.
-
-## Nits
-
-- `_read_json` raises on a malformed SOP. Failing loud is intended; left as-is.
+- `worker_output.schema.json` lists statuses no worker produces (`ready`, `running`, `pending_review`).
+- No schemas yet for `context_package`, `execution_draft`, audit events, or the config files.
+- `config/workers/` is an empty reserved directory (kept for the pluggable-workers idea).
+- Python 3.9 is declared and run in CI only; develop on a current Python.

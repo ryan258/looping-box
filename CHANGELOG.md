@@ -4,6 +4,83 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Trustworthy-gate release (2026-10)
+
+Fixes from a full-repo review; each defect was reproduced before fixing.
+
+**Data-loss fixes**
+- Per-item gating: a boundary-gated file no longer stalls or discards its clean
+  siblings. `execution_engine` drafts clean items from a blocked package and records
+  `held_for_review`; the supervisor still reports the batch as blocked.
+- Approving a review now **releases the item once** into the pipeline (a change with
+  `approved_review`, empty `review_reasons`); previously approval only silenced the gate
+  and the content was never processed.
+- Worker outputs keep history: the prior `context_package`/`draft` move to
+  `cache/workers/<id>/history/` instead of being overwritten by the next batch.
+- After an `execution_engine` model failure, the next supervisor run retries it. Before,
+  `context_builder` went idle, execution was never re-planned, and the failure was
+  silently cleared with no draft.
+
+**Gate and decisions**
+- Matcher rewritten: NFKC, zero-width stripping, case-fold, look-alike letters, spaced-out
+  letters, whole-word matching with inflections (`deployed`, `send_email`; not
+  `committee`, `resend`, `reproduction`). SOP keywords expanded (destructive shell/SQL,
+  `terraform apply`, `wire transfer`, credentials); a test forces every keyword into
+  `config/action_classes.json`, which now also matches the built-in defaults.
+- Review decisions are HMAC-signed (`looping-box.review-record.v2`, adds `approver`,
+  `interactive`, `signature`). Forged, edited, or wrong-key records are ignored and the
+  gate stays closed. Key: `$LOOPING_BOX_REVIEW_KEY` or `~/.config/looping-box/review.key`.
+- `approve` needs an interactive terminal and typed confirmation (override:
+  `LOOPING_BOX_ALLOW_NONINTERACTIVE=1`, recorded); `--note` is required for both
+  decisions; `blocked`-class items need `--allow-blocked`.
+- Inputs over `max_file_bytes` (default 1,000,000) are never read; held as `oversized_input`.
+
+**Audit, locking, status**
+- New hash-chained audit logs: `phase1.jsonl` (new), `supervisor.jsonl` (now with deltas,
+  worker statuses, block reason), `review.jsonl` (now with approver, note, payload hash);
+  `verify_audit_chain` detects edits.
+- One project lock now covers phase 1, the supervisor, and review decisions; an unreadable
+  lock is aged by mtime instead of wedging the loop. JSON writes use a per-process temp
+  file and fsync.
+- `looping-box-supervisor --status` reports live pending reviews (it said `clear` before the
+  supervisor ran).
+- `list`/`show` tolerate one corrupt review payload.
+- A null/refusal model response is a structured `ModelError`, not an `AttributeError`.
+
+**Tooling and docs**
+- `./startday.sh` now runs phase 1 then one supervisor pass. `LOOPING_BOX_ROOT` selects a
+  workspace for every CLI. Demo scripts run in a throwaway workspace (repeatable, no
+  install needed). Bell character only on a TTY.
+- `inbox/*`, `*.egg-info`, build/tool caches git-ignored. pyproject metadata, ruff config,
+  GitHub Actions CI (3.9/3.12/3.14), `CLAUDE.md`, `docs/THREAT-MODEL.md`.
+- Docs corrected where they overclaimed or drifted (SOP, DEMOS, sales demos, README,
+  RECOVERY); the 2026-07-07 audit moved to `docs/history/`; `ROADMAP.md` is the single
+  forward list; `REVIEW.md` is the open-items list.
+
+**Follow-ups from review**
+- Supervisor rollback snapshots no longer hold `history/` bytes in memory (names only);
+  rollback also removes history a blocked run created.
+- A decision record that exists but does not verify is reported (`warnings` in the delta,
+  `--status`, `review list`) instead of silently re-gating. A key file readable by
+  group/other is refused. New `looping-box-review key` and `looping-box-review audit`.
+- Drafts and `draft.md` carry `approved_review`, so a released item keeps its decision trail.
+- `review approve` handles a closed terminal at the confirmation prompt.
+
+**New commands**
+- `looping-box` umbrella CLI: `run`, `status`, `review`, `worker`, `doctor`, `phase1`, `supervisor`
+  (the `looping-box-*` scripts remain).
+- `looping-box doctor`: read-only checks for config drift, stale locks, recovery state, pending and
+  unverifiable reviews, quarantined deltas, key and `.env` permissions, enabled model roles, and
+  audit-chain integrity, each with the remedy. Exits 1 only on a failed check.
+
+- `looping-box init [DIR]` scaffolds a workspace from default config bundled in the package
+  (`src/looping_box/templates/`, shipped as package data); it never overwrites an existing file.
+  A test keeps this repo's `config/` identical to the templates. `looping-box run` in a
+  directory with no config now says to run `init` instead of raising a traceback.
+
+**Breaking:** decision records written before this release (unsigned `v1`) are no longer
+honored; re-decide any pending items. Old unchained audit lines report as a chain break.
+
 ### Added
 
 - Added worker contracts, `context_builder`, `execution_engine`, a one-shot

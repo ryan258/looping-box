@@ -28,7 +28,7 @@ control of the dangerous part.**
 Open a terminal in the project folder. You only ever type the lines in the gray
 boxes. Everything else is just reading the screen out loud.
 
-**Shortcut:** Demos 1 and 2 are also one-tap scripts. Instead of typing the
+**Shortcut:** all three demos are also one-tap scripts. Instead of typing the
 individual lines, you can just run:
 
 ```sh
@@ -37,9 +37,11 @@ individual lines, you can just run:
 ./demo-3.sh   # a human approves, and the gate clears  (run after demo-2)
 ```
 
-Each script drops the example file, runs the loop, and prints what to say.
-`demo-3.sh` approves the item `demo-2.sh` left waiting, so run them in order. The
-step-by-step versions below are there if you'd rather narrate each command.
+Each script resets a throwaway workspace (so it is repeatable and never touches
+your real inbox), drops the example file, runs the loop, and prints what to say.
+`demo-3.sh` approves the item `demo-2.sh` left waiting, so run 2 then 3. The
+step-by-step versions below are there if you'd rather narrate each command; they
+use the real workspace, so use the reset at the bottom between prospects.
 
 ---
 
@@ -96,9 +98,9 @@ slam the brakes.
 
    It lists the held item, marked `review_required`.
 
-**Say:** "This is the part competitors get wrong. It saw 'deploy' and 'send' and
-stopped cold. It will keep flagging this every single time until a real person
-decides. There is no way for it to quietly go rogue."
+**Say:** "It saw 'deploy' and 'send' and stopped. It will keep flagging this every
+single time until a real person decides, and it never performs those actions
+itself. (It's a keyword tripwire, so I'd call it a seatbelt, not a guarantee.)"
 
 ---
 
@@ -119,7 +121,8 @@ considered handled.
    looping-box-review show <paste-the-id>
    ```
 
-3. Approve it, with a note for the record:
+3. Approve it, with a note for the record (it asks you to confirm by typing
+   `approve`):
 
    ```sh
    looping-box-review approve <paste-the-id> --note "Checked with the team, good to go"
@@ -133,8 +136,9 @@ considered handled.
 
    It now says `review=clear`. The item was approved, so it stops nagging.
 
-**Say:** "Every approval is signed, dated, and saved. You get a full paper trail
-of who allowed what and when — auditors love this."
+**Say:** "Every decision is signed, dated, and attributed to a person, and the
+log is hash-chained so edits show up. Approving releases the item into the local
+draft pipeline once; it still doesn't send or deploy anything."
 
 ---
 
@@ -147,12 +151,14 @@ of who allowed what and when — auditors love this."
 ## Likely questions, and honest answers
 
 - **"Can it send an email or deploy by accident?"**
-  No. Outward actions are blocked by design and require an explicit human
-  approval that's saved to a file. It can't approve itself.
+  No. It has no email, deploy, or push capability at all; it prepares local
+  drafts and holds anything that reads like an outward action for a person.
+  Approvals are signed records made at an interactive terminal.
 
 - **"What if it sees something it doesn't recognize?"**
-  It defaults to *caution* — unknown actions are treated as "needs review,"
-  never as "safe."
+  Flagged language it has no specific class for is treated as "needs review,"
+  never "safe." But detection is keyword-based: risky wording it has no keyword
+  for is not caught. Keywords are configurable.
 
 - **"Where does my data go?"**
   Offline by default — with no AI models configured, it runs entirely on the
@@ -167,15 +173,18 @@ of who allowed what and when — auditors love this."
   removes it. Nothing falls through the cracks.
 
 - **"Is there a record if something goes wrong?"**
-  Yes. Every run, approval, and rejection is written to an append-only log you
-  can hand to an auditor.
+  Yes. Every ingestion run, supervisor run, approval, and rejection is written to
+  a hash-chained, append-only log (approver and note included). It's
+  tamper-evident, not tamper-proof: it's a local file.
 
 ## What NOT to promise
 
 Keep it honest — these are **not** in the product today:
 
 - It does not actually send emails, deploy, or post anything itself — it
-  prepares and stages work for a human.
+  prepares and stages work for a human. "Approved" means "released into the local
+  draft pipeline".
+- It does not guarantee every risky request is caught (keyword tripwire).
 - No mobile app or multi-user dashboard yet. (The only outside service it can
   use is OpenRouter, and only when you enable AI assistance for a role.)
 - No live integrations with third-party tools yet.
@@ -184,9 +193,11 @@ If a prospect needs those, log it as a request — don't promise it on the call.
 
 ## Reset between demos
 
-To start fresh for the next prospect:
+The `demo-*.sh` scripts reset themselves. After the step-by-step versions, clear the
+real workspace:
 
 ```sh
 rm -f inbox/notes.txt inbox/release.txt
-find staging/reviews staging/approvals staging/rejections cache/deltas cache/state -type f ! -name .gitkeep -delete
+find cache logs staging -type f ! -name .gitkeep -delete
+rm -f .world_state.json .looping_box.lock
 ```

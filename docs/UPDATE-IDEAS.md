@@ -1,3 +1,10 @@
+> **Status (2026-10-02):** the forward-looking items from this document now live in
+> `ROADMAP.md` (single list). Section 7's open issues and the correctness bugs found in
+> the later review are fixed (see `CHANGELOG.md`). One correction to §4.1: an MCP
+> server must **not** expose `approve_review` — an MCP permission prompt is not an
+> independent human gate, and it would make agent self-approval one call. Expose read
+> tools plus "propose"/`ingest_text` only. Kept here for the reasoning behind each idea.
+
 # Update Ideas — Looping Box as a Tool for AI Professionals
 
 Written 2026-07-10 after a full-repo review (57/57 tests passing; source
@@ -12,7 +19,7 @@ dedup, fail-closed path containment, a two-worker pipeline
 resource limits and rollback, a human review gate with signed decision
 records, append-only audit logs, and an optional per-role model layer that
 degrades to fully-offline behavior. Two prior audits (`REVIEW.md`,
-`docs/20260707.md`) fixed nearly everything they found.
+`docs/history/2026-07-07-audit.md`) fixed nearly everything they found.
 
 What it is today: a **demo-quality proof of the "human stays in the loop"
 architecture**. What it is not yet: a tool an AI professional would install
@@ -381,7 +388,7 @@ tradeoff). Most of the content already exists — it needs collecting.
 
 Carried forward from prior reviews; still open as of this writing:
 
-- **Timeout blocks can self-clear** (`docs/20260707.md` M2): a transient
+- **Timeout blocks can self-clear** (`docs/history/2026-07-07-audit.md` M2): a transient
   slow run blocks, rolls back, and a later rerun may clear it silently,
   contradicting the "never silently self-clear" guarantee for that one
   limit type. Cheapest honest fix: soften the README/RECOVERY claim to

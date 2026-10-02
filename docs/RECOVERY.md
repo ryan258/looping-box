@@ -11,68 +11,75 @@ Commands below assume the local scripts were installed with
 
 ## Clearing the Boundary Gate
 
-When an inbox file contains outward-action language such as `deploy`, `commit`,
-or `send`, Phase 1 trips the boundary gate:
+When an inbox file contains outward-action language (`deploy`, `commit`, `send`, ...)
+or exceeds `max_file_bytes`, phase 1 trips the boundary gate:
 
-- It writes a unique payload under `staging/reviews/`.
-- It updates `staging/pending_review.json`, a stable index of pending payloads.
-- The run reports `review=pending_review`.
-- The triggering file is not marked processed, so it re-surfaces until handled.
+- It writes a payload under `staging/reviews/` and updates `staging/pending_review.json`.
+- The run reports `review=pending_review`; `looping-box-supervisor --status` shows
+  `pending reviews: N` immediately (it reads live review state).
+- The file is not marked processed, so it re-surfaces every run until decided.
+- Clean files in the same batch are drafted normally; only the held item waits.
 
-Deleting `staging/pending_review.json` alone does not resume the loop. The next
-run rebuilds the index from the same inbox file.
+Deleting `staging/pending_review.json` does not resume anything: the next run
+rebuilds the index from the same inbox file.
 
-### Inspect Pending Reviews
+### Decide
 
 ```sh
 looping-box-review list
 looping-box-review show <review_id>
+looping-box-review approve <review_id> --note "why"    # add --allow-blocked for blocked-class items
+looping-box-review reject  <review_id> --note "why"
 ```
 
-Approving or rejecting records the operator decision for that exact source path,
-content hash, and review reason set. It does not execute the requested action.
+Approving needs an interactive terminal (you confirm by typing `approve`).
+Approving **releases the item once** into the pipeline as ordinary work; it does
+not perform the requested action. Rejecting only records the decision. Decisions
+are HMAC-signed (see README); a record that was hand-written, edited, or signed
+with a different key is ignored and the item is gated again.
 
-```sh
-looping-box-review approve <review_id> --note "handled manually"
-looping-box-review reject <review_id> --note "not allowed"
-```
+Approvals run the verifier checks (`cache/verifiers/<id>.json`): payload integrity
+always, plus an optional model check when `MODEL_VERIFIER` is set.
 
-Approvals run deterministic verifier checks and write `cache/verifiers/<id>.json`.
-
-### Resume Ingestion
-
-After recording the decision, rerun ingestion. The unchanged reviewed source item
-is recorded as handled and will not recreate a pending review:
+### Resume
 
 ```sh
 ./startday.sh
 ```
 
-You may also handle the source file listed in the review payload:
+An approved item shows up once as a change; a rejected one is skipped as
+`review_decision_recorded`. You can also remove the source file from `inbox/`, or
+edit it to remove the triggering language and re-ingest.
 
-1. Approve and remove: you handled the request manually. Move or delete the
-   source file from `inbox/`.
-2. Defuse and re-ingest: edit the source file to remove the triggering language.
-3. Reject: remove the source file from `inbox/`.
-
-Archive or remove stale staging index files if you do not need them for audit:
+### Confirm clear state
 
 ```sh
-mkdir -p staging/archive
-mv staging/pending_review.json staging/archive/pending_review-$(date +%Y%m%dT%H%M%SZ).json
-```
-
-### Confirm Clear State
-
-```sh
-./startday.sh
-looping-box-supervisor --once
 looping-box-supervisor --status
 ```
 
-The status should be clear. If it reports pending review again, another inbox
-file still contains boundary-gate language or the reviewed file changed since
-the decision was recorded.
+If it reports pending review again, another inbox file contains gate language, the
+reviewed file changed since the decision (a changed file is a new review), or the
+signing key differs from the one that signed the decision.
+
+### Audit log integrity
+
+`logs/transactions/*.jsonl` are hash-chained. Check them with:
+
+```sh
+looping-box-review audit
+```
+
+It prints `ok` or `BROKEN at line N` per log (exit 1 if any is broken). Lines
+written before chaining existed report as a break at line 1: archive the old file
+and start fresh.
+
+### "I approved it but it keeps coming back"
+
+If `review list` or `--status` says a decision record "did not verify", the record
+is present but not trusted: it was edited, or it was signed with a different key
+(another shell, `XDG_CONFIG_HOME`, cron, or a changed `LOOPING_BOX_REVIEW_KEY`). Run
+`looping-box-review key` to see which key is in use. Fix the environment so the same
+key is used everywhere, or simply approve the item again.
 
 ## Resource-Limit Blocks
 
@@ -111,3 +118,17 @@ bad file to `*.bad`, reports `malformed_delta_quarantined` in its worker output,
 and continues with any valid deltas. Inspect the `.bad` file if you need the
 corrupt payload for audit; otherwise it is safe to archive or delete after the
 good deltas have been processed.
+
+## Stuck Lock
+
+phase 1, the supervisor, and review decisions share `.looping_box.lock`. A second
+caller gets `busy: active supervisor lock`. A lock older than `stale_lock_seconds`
+(default 300, in `config/super_loop.json`) is recovered automatically, including
+an unreadable lock (aged by file mtime). If you are certain nothing is running,
+delete `.looping_box.lock`.
+
+## Model Outage
+
+A model error during `execution_engine` or `context_builder` shows as
+`status: failed` with the error. Just rerun `./startday.sh`: the failed step is
+retried with nothing lost.
