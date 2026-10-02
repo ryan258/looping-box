@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Demo 3 — "The human gives the green light."
 # Takes the item that Demo 2 left waiting, approves it with a note, and shows
-# the loop go quiet. Run ./demo-2.sh first so there is something to approve.
+# the item released into the pipeline. Run ./demo-2.sh first.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/demo-env.sh"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${ROOT_DIR}"
-
-echo "DEMO 3: A human approves the held item, and the nagging stops."
+echo "DEMO 3: A human approves the held item and it is released."
 echo "------------------------------------------------------------"
 
-REVIEW_ID="$(looping-box-review list | head -1 | cut -d' ' -f1)"
+REVIEW_ID="$(lb review list | head -1 | cut -d' ' -f1 || true)"
 if [ -z "${REVIEW_ID}" ]; then
   echo "Nothing is waiting for review. Run ./demo-2.sh first, then try again."
   exit 0
@@ -19,23 +17,23 @@ fi
 echo "Found the item waiting for a decision: ${REVIEW_ID}"
 echo
 echo "What is being asked (the full record a reviewer would read):"
-looping-box-review show "${REVIEW_ID}"
+lb review show "${REVIEW_ID}"
 
 echo
-echo "A person approves it, leaving a note for the record..."
-if looping-box-review approve "${REVIEW_ID}" --note "Checked with the team, good to go"; then
+echo "A person approves it, leaving a note for the record."
+echo "(Approvals normally need an interactive terminal; the demo opts out explicitly.)"
+if LOOPING_BOX_ALLOW_NONINTERACTIVE=1 lb review approve "${REVIEW_ID}" --note "Checked with the team, good to go"; then
   echo
   echo "Running the loop one more time..."
   echo
-  ./startday.sh
+  "${ROOT_DIR}/startday.sh"
   echo
   echo "------------------------------------------------------------"
-  echo "It now reads 'review=clear'. The item was approved, so it stops nagging."
-  echo "Every approval is signed, dated, and saved — a full audit trail."
+  echo "It now reads 'review=clear' and the approved item was processed once."
+  echo "The decision is HMAC-signed with the approver's name, and the audit log is"
+  echo "hash-chained: ${LOOPING_BOX_ROOT}/logs/transactions/review.jsonl"
 else
   echo
   echo "------------------------------------------------------------"
-  echo "The safety verifier REFUSED to record this approval."
-  echo "Even after a person says yes, a deterministic (and optional model)"
-  echo "check gets the final say on risky actions. The item stays held."
+  echo "The approval was DECLINED (see the message above). The item stays held."
 fi

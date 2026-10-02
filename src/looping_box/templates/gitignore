@@ -1,0 +1,10 @@
+# Looping Box workspace: keep config in git, keep runtime state and inputs out.
+.env
+.looping_box.lock
+.world_state.json
+cache/
+staging/
+logs/
+inbox/*
+!inbox/.gitkeep
+*.tmp
