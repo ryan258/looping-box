@@ -7,11 +7,13 @@ and ships behind explicit human approval.
 
 Effort: **S** hours, **M** a day or two, **L** a week+.
 
-## Next release: "trustworthy gate" (implemented, uncommitted; 88+ tests pass locally)
+## Next release: "trustworthy gate" (implemented, tested, and bundled)
 Per-item gating, approval release, signed attributed decisions, hash-chained audit
 (+ `looping-box-review audit`), normalized whole-word matcher, shared lock, size cap,
 retry-after-outage, live status, unverifiable-decision warnings, key-permission check,
-repeatable demos, CI. Decide what to ship before starting anything below.
+repeatable demos, CI, then the second review pass (CHANGELOG: carry-over after outage,
+phantom-review fix, gate gaps, approval hardening, exit codes). All tests pass locally;
+decide the LICENSE, then cut 0.1.0 before starting anything below.
 
 ## Adoption (after the release above)
 - `[x]` `looping-box` umbrella CLI (`run`, `status`, `review`, `worker`, `doctor`, `init`); `report` still open. **S**
@@ -26,6 +28,7 @@ repeatable demos, CI. Decide what to ship before starting anything below.
 - `[ ]` Interactive review loop (`looping-box-review interactive`) and notification hook on gate trip. **M**
 
 ## Platform
+- `[ ]` Kernel-backed project lock (`flock`/`msvcrt`) with no time-based steal; enforced worker deadline (thread/subprocess). **M**
 - `[ ]` Pluggable workers (registry in `config/workers/`, entry points). **L**
 - `[ ]` Watch mode (foreground polling, stops at any block; needs `load_env` reload). **L**
 - `[ ]` Optional model classifier that can only raise severity; optional verifier ensemble (advisory). **M**

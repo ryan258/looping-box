@@ -21,6 +21,11 @@ looping-box doctor                   # read-only health check with remedies
 `looping-box` also fronts `review`, `worker`, `phase1` and `supervisor`
 (`looping-box --help`). The older `looping-box-*` scripts still work.
 
+**Exit codes** (`run`, `supervisor --once`, `worker`, `./startday.sh`): `0` ok, `1`
+failed (e.g. a model outage; rerun after fixing) or busy (another run holds the lock),
+`2` blocked (a held review or a resource limit needs you). Scripts and cron can branch
+on `2` without parsing output.
+
 **Your own workspace** (instead of running inside this repo): the package bundles
 its default config, so after `pip install` you can scaffold anywhere:
 
@@ -101,7 +106,8 @@ offline by default. To enable one, copy `.env.example` to `.env` and set
 for that role. `context_builder` and `execution_engine` never see held (gated) items,
 but the `verifier` role does: it receives the held item's excerpt when you approve.
 Tests and demos never hit the
-network. `.env` is git-ignored; keep it `chmod 600`.
+network. `.env` is git-ignored; keep it `chmod 600`. Only `OPENROUTER_*` and `MODEL_*`
+entries are read from it, and `OPENROUTER_BASE_URL` must be `http(s)://`.
 
 ## Guarantees (and their limits)
 
@@ -110,7 +116,11 @@ network. `.env` is git-ignored; keep it `chmod 600`.
   never drafted or sent to a model, while clean items in the same batch are.
 - Gated language is held for review rather than processed. *Limit:* keyword-based.
 - Decisions are signed, attributed, and audit-logged. *Limit:* same-user processes can read the key.
-- phase 1, the supervisor, and review decisions are serialized by one project lock.
+- phase 1, the supervisor, review decisions, and a bare `looping-box worker` pass are serialized by one project lock.
+- The pending-review list is rebuilt from the inbox every run: removing a held file, or
+  editing out its trigger language, clears its review.
+- A batch that was ingested but not yet drafted (e.g. execution failed during a model
+  outage) is carried into the next context package rather than replaced by it.
 - Deterministic resource-limit blocks (file count, payload size) persist across
   reruns until the operator changes the limit. Worker-runtime blocks roll back
   local worker output and retry the same work; a transient timeout can clear on a rerun.

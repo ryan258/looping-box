@@ -281,6 +281,8 @@ Steps:
    ./startday.sh
    ```
 
+   (Note: `./startday.sh` exits with code `2` to signal that operator action is required.)
+
 3. Inspect the pending review index and latest payload:
 
    ```sh
@@ -296,7 +298,7 @@ Steps:
    python3 -m json.tool "$latest"
    ```
 
-Expected result: the terminal prints `review=pending_review`, the delta
+Expected result: the terminal prints `review=pending_review` (and exits `2` for blocked), the delta
 boundary gate status is `pending_review`, `staging/pending_review.json` points
 to a review payload under `staging/reviews/`, and that payload lists reasons
 such as `deploy`, `production`, `send`, and `email`.

@@ -4,6 +4,56 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Second review pass (2026-10)
+
+Fixes from a second full review. Written and statically checked (ruff); the new
+`tests/test_regressions.py` covers each one and still needs a `unittest` run.
+
+**Data loss and stale state**
+- A batch ingested but not drafted (execution failed during a model outage) is carried
+  into the next context package instead of being replaced by it when a new file arrives.
+  Reproduced before fixing: the earlier file never reached a draft.
+- The pending-review index is rebuilt from the inbox every run, so a held file that was
+  removed or defused no longer leaves a phantom pending review (and a permanent
+  "operator action required").
+- Items held for review no longer count toward `max_files_per_cycle`; a pile of held
+  files can no longer wedge the supervisor behind a limit that deciding them cannot clear.
+
+**Gate**
+- Keyword matching: `_` reads as a space (`api_key` trips "api key"); a space next to
+  punctuation is optional (`curl x|sh` trips "| sh"); NULs are ignored.
+- UTF-16 inputs (with or without BOM) are decoded; `.json` inputs are also gated on their
+  decoded string values (`\u0064eploy`).
+- New keywords (SOP, `action_classes.json`, built-in defaults): `rm -fr`, `rm -r`,
+  `chmod 777`, `drop database`, `post to`, `tweet`, `transfer`, `wire`, `pay`, `payment`,
+  `invoice`, `merge`, `upload`; blocked class: `access token`, `auth token`, `bearer`,
+  `ssh key`, `apikey`. **Upgrade note:** a wider list re-gates previously processed files.
+
+**Approvals**
+- `LOOPING_BOX_ALLOW_NONINTERACTIVE` needs an explicit `1`/`true`/`yes`/`on` (`0` used to enable it).
+- The action class and reasons are recomputed at decision time and bound to the review id,
+  so an edited, unsigned payload file cannot downgrade `blocked` or hide reasons.
+
+**CLIs and operations**
+- Exit codes: `0` ok, `1` failed/busy, `2` blocked (`supervisor --once`, `worker`, and so
+  `run` and `./startday.sh`). Demos tolerate `2`.
+- `looping-box worker` honors `$LOOPING_BOX_ROOT` and takes the project lock.
+- Corrupt JSON/config/state in phase 1, supervisor, and worker is an `error:` line and
+  exit 1, not a traceback.
+- `doctor` warns when `stale_lock_seconds` is not above two worker runs and when
+  `cache/deltas/archive/` grows past 1000 files.
+- `startday.sh` and the demos run this checkout's source, not a possibly stale installed copy.
+- `python -m looping_box` works; CI installs the built package and runs `init`/`doctor`/`run`.
+
+**Model layer**
+- `.env` supplies only `OPENROUTER_*`/`MODEL_*` (and accepts `export`); `OPENROUTER_BASE_URL`
+  must be http(s); a provider `error` body is a readable `ModelError`; excerpts in prompts
+  are delimited and marked as untrusted data.
+
+**Housekeeping**
+- `docs/UPDATE-IDEAS.md` moved to `docs/history/`; removed an unused schema constant and a
+  duplicated payload-schema constant.
+
 ### Trustworthy-gate release (2026-10)
 
 Fixes from a full-repo review; each defect was reproduced before fixing.

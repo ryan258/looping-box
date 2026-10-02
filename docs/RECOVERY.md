@@ -1,6 +1,7 @@
 # Operator Recovery
 
-`looping-box-supervisor --status` reports `operator action required` for two unrelated
+`looping-box-supervisor --status` reports `operator action required` (and `--once` exits
+`2`) for two unrelated
 reasons: content that tripped the boundary gate (below), or the supervisor's
 own resource limits (see [Resource-Limit Blocks](#resource-limit-blocks)).
 Check `state["recovery"]["blocked_reason"]` (or just read the `Next:` line —
@@ -32,7 +33,8 @@ looping-box-review approve <review_id> --note "why"    # add --allow-blocked for
 looping-box-review reject  <review_id> --note "why"
 ```
 
-Approving needs an interactive terminal (you confirm by typing `approve`).
+Approving needs an interactive terminal (you confirm by typing `approve`;
+`LOOPING_BOX_ALLOW_NONINTERACTIVE` must be an explicit `1`/`true`/`yes`/`on`).
 Approving **releases the item once** into the pipeline as ordinary work; it does
 not perform the requested action. Rejecting only records the decision. Decisions
 are HMAC-signed (see README); a record that was hand-written, edited, or signed
@@ -49,7 +51,8 @@ always, plus an optional model check when `MODEL_VERIFIER` is set.
 
 An approved item shows up once as a change; a rejected one is skipped as
 `review_decision_recorded`. You can also remove the source file from `inbox/`, or
-edit it to remove the triggering language and re-ingest.
+edit it to remove the triggering language and re-ingest: the next run drops its
+pending review.
 
 ### Confirm clear state
 
@@ -102,9 +105,11 @@ For `worker_timeout`, the same rollback happens before retry. If the timeout
 was a transient slow run, a later rerun can clear it; repeated timeouts mean
 you should raise `max_worker_runtime_seconds` or reduce the work in the cycle.
 
-There is no source file to edit for any of these. Resolve by either raising
-the matching limit in `config/super_loop.json`, or shrinking the batch (fewer
-files in `inbox/` per run), then rerun:
+There is no source file to edit for any of these, and removing files from `inbox/`
+does not help: the files were already ingested and their delta is kept, so the work
+runs once you raise the matching limit in `config/super_loop.json`. (Fewer files per
+run only prevents the next block.) Items held for review do not count toward
+`max_files_per_cycle`. Then rerun:
 
 ```sh
 looping-box-supervisor --once
@@ -121,14 +126,15 @@ good deltas have been processed.
 
 ## Stuck Lock
 
-phase 1, the supervisor, and review decisions share `.looping_box.lock`. A second
-caller gets `busy: active supervisor lock`. A lock older than `stale_lock_seconds`
-(default 300, in `config/super_loop.json`) is recovered automatically, including
-an unreadable lock (aged by file mtime). If you are certain nothing is running,
-delete `.looping_box.lock`.
+phase 1, the supervisor, review decisions, and bare worker passes share
+`.looping_box.lock`. A second caller gets `busy: active supervisor lock`. A lock
+older than `stale_lock_seconds` (default 300, in `config/super_loop.json`) is
+recovered automatically, including an unreadable lock (aged by file mtime). If
+you are certain nothing is running, delete `.looping_box.lock`.
 
 ## Model Outage
 
 A model error during `execution_engine` or `context_builder` shows as
-`status: failed` with the error. Just rerun `./startday.sh`: the failed step is
-retried with nothing lost.
+`status: failed` (exit code 1) with the error. Just rerun `./startday.sh`: the failed
+step is retried. If new files arrive before the retry, the earlier undrafted batch is
+carried into the new context package, so nothing is dropped.

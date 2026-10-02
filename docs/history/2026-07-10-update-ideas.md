@@ -1,3 +1,5 @@
+> **Historical (moved to `docs/history/`).** Kept for the reasoning behind each idea; `ROADMAP.md` is the live list.
+>
 > **Status (2026-10-02):** the forward-looking items from this document now live in
 > `ROADMAP.md` (single list). Section 7's open issues and the correctness bugs found in
 > the later review are fixed (see `CHANGELOG.md`). One correction to §4.1: an MCP
