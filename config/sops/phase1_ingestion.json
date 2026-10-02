@@ -51,10 +51,30 @@
       "remove",
       "credential",
       "secret",
-      "production"
+      "production",
+      "deployment",
+      "redeploy",
+      "republish",
+      "resend",
+      "deletion",
+      "rm -rf",
+      "sudo",
+      "drop table",
+      "truncate table",
+      "git reset --hard",
+      "terraform apply",
+      "kubectl apply",
+      "wire transfer",
+      "transfer funds",
+      "bank transfer",
+      "| sh",
+      "| bash",
+      "password",
+      "api key",
+      "private key"
     ],
     "notification_message": "Boundary gate review required before outward action."
   },
-  "max_excerpt_chars": 500
+  "max_excerpt_chars": 500,
+  "max_file_bytes": 1000000
 }
-

@@ -112,7 +112,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(draft["source_context"], "cache/workers/context_builder/context_package.json")
             self.assertTrue(draft["source_context_sha256"])
 
-    def test_execution_engine_refuses_blocked_or_missing_context(self):
+    def test_execution_engine_refuses_missing_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _make_sop(root)
@@ -120,13 +120,41 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(missing["status"], "blocked")
             self.assertEqual(missing["errors"][0]["code"], "missing_context")
 
+    def test_execution_engine_drafts_clean_items_and_holds_gated_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
             (root / "inbox" / "release.txt").write_text("please deploy", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:01:00Z")
             run_worker(root, "context_builder", now="2026-06-24T12:02:00Z")
 
-            blocked = run_worker(root, "execution_engine", now="2026-06-24T12:03:00Z")
-            self.assertEqual(blocked["status"], "blocked")
-            self.assertEqual(blocked["errors"][0]["code"], "blocked_context")
+            result = run_worker(root, "execution_engine", now="2026-06-24T12:03:00Z")
+
+            self.assertEqual(result["status"], "complete")
+            draft_path = root / "cache" / "workers" / "execution_engine" / "draft.json"
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+            self.assertEqual([i["relative_path"] for i in draft["items"]], ["inbox/notes.md"])
+            self.assertEqual(draft["held_for_review"], ["inbox/release.txt"])
+
+    def test_later_batches_do_not_erase_earlier_drafts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_sop(root)
+            (root / "inbox" / "a.md").write_text("docs a", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:00:00Z")
+            run_worker(root, "context_builder", now="2026-06-24T12:01:00Z")
+            run_worker(root, "execution_engine", now="2026-06-24T12:02:00Z")
+            (root / "inbox" / "b.md").write_text("docs b", encoding="utf-8")
+            run_phase1(root, now="2026-06-24T12:03:00Z")
+            run_worker(root, "context_builder", now="2026-06-24T12:04:00Z")
+            run_worker(root, "execution_engine", now="2026-06-24T12:05:00Z")
+
+            out = root / "cache" / "workers" / "execution_engine"
+            latest = json.loads((out / "draft.json").read_text())
+            self.assertEqual([i["relative_path"] for i in latest["items"]], ["inbox/b.md"])
+            archived = [json.loads(p.read_text()) for p in (out / "history").glob("*-draft.json")]
+            self.assertEqual([[i["relative_path"] for i in d["items"]] for d in archived], [["inbox/a.md"]])
 
 
 if __name__ == "__main__":

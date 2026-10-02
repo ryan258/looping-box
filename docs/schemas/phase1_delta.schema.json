@@ -63,7 +63,8 @@
           "size_bytes": {"type": "integer"},
           "matched_routes": {"type": "array", "items": {"type": "string"}},
           "review_reasons": {"type": "array", "items": {"type": "string"}},
-          "excerpt": {"type": "string"}
+          "excerpt": {"type": "string"},
+          "approved_review": {"type": "string"}
         }
       }
     },
@@ -76,6 +77,19 @@
           "relative_path": {"type": "string"},
           "sha256": {"type": "string"},
           "reason": {"type": "string"}
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "review_id", "relative_path", "message"],
+        "properties": {
+          "code": {"type": "string"},
+          "review_id": {"type": "string"},
+          "relative_path": {"type": "string"},
+          "message": {"type": "string"}
         }
       }
     },

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,20 +10,29 @@ from typing import Any
 from . import model
 from ._util import (
     PENDING_REVIEW_INDEX_SCHEMA,
-    decision_record_exists as _decision_record_exists,
+    append_audit as _append_audit_event,
+    decision_state as _decision_state,
+    default_approver as _default_approver,
+    default_root as _default_root,
+    key_status as _key_status,
+    project_lock as _project_lock,
     read_json as _read_json,
     read_pending_review_index as _read_pending_review_index,
     rel as _rel,
     resolve_under_root as _resolve_under_root,
+    review_key as _review_key,
     sha256_file as _sha256_file,
+    sign_record as _sign_record,
     utc_now as _utc_now,
+    verify_audit_chain as _verify_audit_chain,
     write_json as _write_json,
 )
 
 
 REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
-REVIEW_RECORD_SCHEMA = "looping-box.review-record.v1"
+REVIEW_RECORD_SCHEMA = "looping-box.review-record.v2"
 VERIFIER_RESULT_SCHEMA = "looping-box.verifier-result.v1"
+
 
 def list_reviews(root: Path | str) -> list[dict[str, Any]]:
     root_path = Path(root).resolve()
@@ -33,9 +43,15 @@ def list_reviews(root: Path | str) -> list[dict[str, Any]]:
         review_path = _resolve_under_root(root_path, review_ref)
         if not review_path.exists():
             continue
-        payload = _read_json(review_path)
+        try:
+            payload = _read_json(review_path)
+        except (OSError, json.JSONDecodeError):
+            continue  # one corrupt payload must not hide every other review
         review_id = payload.get("review_id")
-        if not review_id or _decision_record_exists(staging_dir, review_id):
+        if not review_id:
+            continue
+        decision, unverifiable = _decision_state(staging_dir, review_id)
+        if decision is not None:
             continue
         reviews.append(
             {
@@ -44,9 +60,16 @@ def list_reviews(root: Path | str) -> list[dict[str, Any]]:
                 "status": "pending",
                 "action_class": payload.get("action_class", "review_required"),
                 "risk_reasons": list(payload.get("risk_reasons", [])),
+                "unverifiable_decision": unverifiable,
             }
         )
     return reviews
+
+
+def verify_audit_logs(root: Path | str) -> dict[str, int | None]:
+    """Hash-chain check of every audit log: name -> None (intact) or first broken line."""
+    log_dir = _resolve_under_root(Path(root).resolve(), "logs/transactions")
+    return {path.name: _verify_audit_chain(path) for path in sorted(log_dir.glob("*.jsonl"))}
 
 
 def show_review(root: Path | str, review_id: str) -> dict[str, Any]:
@@ -62,17 +85,51 @@ def record_review(
     *,
     note: str = "",
     now: str | None = None,
+    approver: str | None = None,
+    interactive: bool = False,
+    allow_blocked: bool = False,
 ) -> dict[str, Any]:
     if decision not in {"approved", "rejected"}:
         raise ValueError(f"unknown review decision: {decision}")
 
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
+    with _project_lock(root_path, generated_at):
+        return _record_review_locked(
+            root_path,
+            review_id,
+            decision,
+            note=note,
+            generated_at=generated_at,
+            approver=approver or _default_approver(),
+            interactive=interactive,
+            allow_blocked=allow_blocked,
+        )
+
+
+def _record_review_locked(
+    root_path: Path,
+    review_id: str,
+    decision: str,
+    *,
+    note: str,
+    generated_at: str,
+    approver: str,
+    interactive: bool,
+    allow_blocked: bool,
+) -> dict[str, Any]:
     payload, payload_path = _find_review(root_path, review_id)
+    key = _review_key(create=True)
+    if key is None:
+        raise ValueError(f"review signing key is unavailable ({_key_status()})")
     verifier_result: str | None = None
     if decision == "approved":
         if payload.get("action_class") == "forbidden":
             raise ValueError(f"forbidden review cannot be approved: {review_id}")
+        if payload.get("action_class") == "blocked" and not allow_blocked:
+            raise ValueError(
+                f"blocked review needs an explicit override (--allow-blocked): {review_id}"
+            )
         verifier = run_verifier(root_path, review_id, now=generated_at)
         verifier_result = verifier["path"]
         if verifier["status"] != "passed":
@@ -87,14 +144,17 @@ def record_review(
         "generated_at": generated_at,
         "decision": decision,
         "note": note,
+        "approver": approver,
+        "interactive": interactive,
         "payload_sha256": _sha256_file(payload_path),
         "verifier_result": verifier_result,
     }
+    record["signature"] = _sign_record(record, key)
     directory = "approvals" if decision == "approved" else "rejections"
     record_path = _resolve_under_root(root_path, f"staging/{directory}/{review_id}.json")
     _write_json(record_path, record)
     _remove_from_pending_index(root_path, review_id)
-    _append_review_audit(root_path, generated_at, decision, review_id)
+    _append_review_audit(root_path, record)
     return record
 
 
@@ -199,7 +259,10 @@ def _find_review(root: Path, review_id: str) -> tuple[dict[str, Any], Path]:
         review_path = _resolve_under_root(root, review_ref)
         if not review_path.exists():
             continue
-        payload = _read_json(review_path)
+        try:
+            payload = _read_json(review_path)
+        except (OSError, json.JSONDecodeError):
+            continue
         if payload.get("review_id") == review_id:
             return payload, review_path
     raise ValueError(f"unknown review: {review_id}")
@@ -229,25 +292,34 @@ def _remove_from_pending_index(root: Path, review_id: str) -> None:
     )
 
 
-def _append_review_audit(root: Path, generated_at: str, decision: str, review_id: str) -> None:
-    audit_path = _resolve_under_root(root, "logs/transactions/review.jsonl")
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    event = {
-        "schema": "looping-box.audit-event.v1",
-        "generated_at": generated_at,
-        "event": f"review.{decision}",
-        "review_id": review_id,
-    }
-    with audit_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
+def _append_review_audit(root: Path, record: dict[str, Any]) -> None:
+    _append_audit_event(
+        root,
+        "review",
+        {
+            "event": f"review.{record['decision']}",
+            "generated_at": record["generated_at"],
+            "review_id": record["review_id"],
+            "approver": record["approver"],
+            "interactive": record["interactive"],
+            "note": record["note"],
+            "payload_sha256": record["payload_sha256"],
+        },
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect or record Looping Box review decisions.")
-    parser.add_argument("--root", default=".", help="Project root. Defaults to the current directory.")
+    parser.add_argument(
+        "--root",
+        default=_default_root(),
+        help="Project root. Defaults to $LOOPING_BOX_ROOT, else the current directory.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list", help="List pending reviews.")
+    subparsers.add_parser("key", help="Show where the signing key comes from and whether it is usable.")
+    subparsers.add_parser("audit", help="Verify the hash chain of every audit log (exit 1 if any is broken).")
     show_parser = subparsers.add_parser("show", help="Show one review payload.")
     show_parser.add_argument("review_id")
 
@@ -255,20 +327,74 @@ def main() -> int:
     for command, decision in decision_commands.items():
         decision_parser = subparsers.add_parser(command, help=f"Record a {decision} decision.")
         decision_parser.add_argument("review_id")
-        decision_parser.add_argument("--note", default="")
+        decision_parser.add_argument("--note", required=True, help="Why (kept in the audit log).")
+        if command == "approve":
+            decision_parser.add_argument(
+                "--allow-blocked",
+                action="store_true",
+                help="Explicitly override a 'blocked' action class (credentials, secrets, production).",
+            )
 
     args = parser.parse_args()
     if args.command == "list":
         for review in list_reviews(args.root):
-            print(f"{review['review_id']} {review['action_class']} {review['path']}")
+            flag = " (decision record present but unverifiable: see `key`)" if review["unverifiable_decision"] else ""
+            print(f"{review['review_id']} {review['action_class']} {review['path']}{flag}")
         return 0
+    if args.command == "key":
+        print(_key_status())
+        return 0
+    if args.command == "audit":
+        results = verify_audit_logs(args.root)
+        for name, broken_at in results.items():
+            print(f"{name}: " + ("ok" if broken_at is None else f"BROKEN at line {broken_at}"))
+        return 1 if any(line is not None for line in results.values()) else 0
     if args.command == "show":
-        print(json.dumps(show_review(args.root, args.review_id), indent=2, sort_keys=True))
+        try:
+            print(json.dumps(show_review(args.root, args.review_id), indent=2, sort_keys=True))
+        except ValueError as exc:
+            print(f"declined: {exc}", file=sys.stderr)
+            return 1
         return 0
+
+    interactive = sys.stdin.isatty()
+    if args.command == "approve":
+        # Approvals are a human act. This is friction, not a security boundary
+        # (a same-user process can still set the override), but it is recorded.
+        if not interactive and not os.environ.get("LOOPING_BOX_ALLOW_NONINTERACTIVE"):
+            print(
+                "declined: approvals need an interactive terminal "
+                "(set LOOPING_BOX_ALLOW_NONINTERACTIVE=1 to override; it is recorded)",
+                file=sys.stderr,
+            )
+            return 1
+        if interactive:
+            try:
+                payload = show_review(args.root, args.review_id)
+            except ValueError as exc:
+                print(f"declined: {exc}", file=sys.stderr)
+                return 1
+            reasons = ", ".join(payload.get("risk_reasons", []))
+            try:
+                answer = input(
+                    f"Approve {args.review_id} [{payload.get('action_class')}: {reasons}]? Type 'approve': "
+                )
+            except EOFError:
+                answer = ""
+            if answer.strip() != "approve":
+                print("declined: not confirmed", file=sys.stderr)
+                return 1
     try:
-        record = record_review(args.root, args.review_id, decision_commands[args.command], note=args.note)
-    except ValueError as exc:
-        # Expected: unknown id, or a verifier (incl. model judge) that refused.
+        record = record_review(
+            args.root,
+            args.review_id,
+            decision_commands[args.command],
+            note=args.note,
+            interactive=interactive,
+            allow_blocked=getattr(args, "allow_blocked", False),
+        )
+    except (ValueError, RuntimeError) as exc:
+        # Expected: unknown id, a refusing verifier (incl. model judge), or a busy lock.
         print(f"declined: {exc}", file=sys.stderr)
         return 1
     print(f"{record['decision']}: {record['review_id']}")

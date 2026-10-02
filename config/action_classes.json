@@ -11,18 +11,39 @@
       "commit",
       "push",
       "deploy",
+      "deployment",
+      "redeploy",
       "publish",
+      "republish",
       "send",
+      "resend",
       "email",
       "execute",
       "run script",
       "delete",
-      "remove"
+      "deletion",
+      "remove",
+      "rm -rf",
+      "sudo",
+      "drop table",
+      "truncate table",
+      "git reset --hard",
+      "terraform apply",
+      "kubectl apply",
+      "wire transfer",
+      "transfer funds",
+      "bank transfer",
+      "| sh",
+      "| bash",
+      "oversized_input"
     ],
     "blocked": [
       "credential",
       "secret",
-      "production"
+      "production",
+      "password",
+      "api key",
+      "private key"
     ],
     "forbidden": []
   }

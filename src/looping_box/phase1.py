@@ -3,12 +3,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 from ._util import (
     PENDING_REVIEW_INDEX_SCHEMA,
+    append_audit as _append_audit,
+    decision_state as _decision_state,
+    key_status as _key_status,
     decision_record_exists as _decision_record_exists,
+    default_root as _default_root,
+    project_lock as _project_lock,
     read_json as _read_json,
     read_pending_review_index as _read_pending_review_index,
     rel as _rel,
@@ -17,13 +23,14 @@ from ._util import (
     utc_now as _utc_now,
     write_json as _write_json,
 )
-from .action_policy import classify_reasons
+from .action_policy import classify_reasons, match_keywords as _match_keywords
 
 
 STATE_SCHEMA = "looping-box.phase1.state.v1"
 DELTA_SCHEMA = "looping-box.phase1.delta.v1"
 BOUNDARY_SCHEMA = "looping-box.boundary-review.v1"
 REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
+DEFAULT_MAX_FILE_BYTES = 1_000_000
 
 
 def run_phase1(
@@ -36,10 +43,31 @@ def run_phase1(
     delta_dir: Path | str = "cache/deltas",
     staging_dir: Path | str = "staging",
 ) -> dict[str, Any]:
-    """Run one deterministic local ingestion pass."""
+    """Run one deterministic local ingestion pass (serialized by the project lock)."""
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
+    with _project_lock(root_path, generated_at):
+        return _run_phase1_locked(
+            root_path,
+            generated_at,
+            input_dir=input_dir,
+            sop_path=sop_path,
+            state_path=state_path,
+            delta_dir=delta_dir,
+            staging_dir=staging_dir,
+        )
 
+
+def _run_phase1_locked(
+    root_path: Path,
+    generated_at: str,
+    *,
+    input_dir: Path | str,
+    sop_path: Path | str,
+    state_path: Path | str,
+    delta_dir: Path | str,
+    staging_dir: Path | str,
+) -> dict[str, Any]:
     resolved_input_dir = _resolve_under_root(root_path, input_dir)
     resolved_sop_path = _resolve_under_root(root_path, sop_path)
     resolved_state_path = _resolve_under_root(root_path, state_path)
@@ -60,9 +88,13 @@ def run_phase1(
         extension.lower() for extension in sop.get("allowed_extensions", [".md", ".txt", ".json"])
     }
 
+    max_file_bytes = int(sop.get("max_file_bytes", DEFAULT_MAX_FILE_BYTES))
+
     changes: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     review_items: list[dict[str, Any]] = []
+    released_ids: list[str] = []
+    warnings: list[dict[str, str]] = []
     all_review_reasons: list[str] = []
 
     for file_path in _iter_input_files(resolved_input_dir, root_path, allowed_extensions):
@@ -70,12 +102,17 @@ def run_phase1(
         content_hash = _sha256_file(file_path)
         file_stat = file_path.stat()
 
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-        matched_routes = _match_routes(text, sop.get("routes", []))
-        review_reasons = _match_keywords(
-            text,
-            sop.get("boundary_gate", {}).get("requires_review_keywords", []),
-        )
+        if file_stat.st_size > max_file_bytes:
+            # Fail closed: never read an oversized input into memory or a model
+            # prompt; a human decides whether it is processed at all.
+            text, matched_routes, review_reasons = "", [], ["oversized_input"]
+        else:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            matched_routes = _match_routes(text, sop.get("routes", []))
+            review_reasons = _match_keywords(
+                text,
+                sop.get("boundary_gate", {}).get("requires_review_keywords", []),
+            )
 
         change = {
             "relative_path": relative_path,
@@ -88,7 +125,17 @@ def run_phase1(
 
         if review_reasons:
             review_id = _review_id([change])
-            if _decision_record_exists(resolved_staging_dir, review_id):
+            decision, unverifiable = _decision_state(resolved_staging_dir, review_id)
+            if decision == "approved" and not _processed_at_path(state, relative_path, content_hash):
+                # An approval releases the item into the pipeline exactly once,
+                # as ordinary work: without this, approving would only silence
+                # the gate and the approved content would never be processed.
+                released = dict(change, review_reasons=[], approved_review=review_id)
+                changes.append(released)
+                released_ids.append(review_id)
+                _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
+                continue
+            if decision is not None:
                 skipped.append(
                     {
                         "relative_path": relative_path,
@@ -98,6 +145,16 @@ def run_phase1(
                 )
                 _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
                 continue
+            if unverifiable:
+                warnings.append(
+                    {
+                        "code": "decision_unverifiable",
+                        "review_id": review_id,
+                        "relative_path": relative_path,
+                        "message": "a decision record exists but did not verify "
+                        f"(edited, forged, or signed with a different key); {_key_status()}",
+                    }
+                )
             changes.append(change)
             review_items.append(change)
             for reason in review_reasons:
@@ -154,6 +211,7 @@ def run_phase1(
         "summary": summary,
         "changes": changes,
         "skipped": skipped,
+        "warnings": warnings,
         "boundary_gate": boundary_gate,
     }
 
@@ -161,6 +219,21 @@ def run_phase1(
         delta_path = resolved_delta_dir / f"{run_id}.json"
         delta["delta_path"] = _rel(root_path, delta_path)
         _write_json(delta_path, delta)
+        _append_audit(
+            root_path,
+            "phase1",
+            {
+                "event": "phase1.run",
+                "generated_at": generated_at,
+                "run_id": run_id,
+                "changed": summary["changed"],
+                "skipped": summary["skipped"],
+                "gate": boundary_gate["status"],
+                "review_ids": [_review_id([item]) for item in review_items],
+                "released_review_ids": released_ids,
+                "warnings": [w["code"] + ":" + w["review_id"] for w in warnings],
+            },
+        )
     else:
         delta["delta_path"] = None
 
@@ -223,6 +296,11 @@ def _has_processed(state: dict[str, Any], relative_path: str, content_hash: str)
     return content_hash in state["processed_hashes"]
 
 
+def _processed_at_path(state: dict[str, Any], relative_path: str, content_hash: str) -> bool:
+    processed_file = state["processed_files"].get(relative_path)
+    return bool(processed_file) and processed_file.get("sha256") == content_hash
+
+
 def _record_processed(
     state: dict[str, Any],
     relative_path: str,
@@ -271,16 +349,6 @@ def _match_routes(text: str, routes: list[dict[str, Any]]) -> list[str]:
         label = route.get("label")
         if label and _match_keywords(text, route.get("keywords", [])):
             matches.append(str(label))
-    return matches
-
-
-def _match_keywords(text: str, keywords: list[str]) -> list[str]:
-    lowered = text.lower()
-    matches: list[str] = []
-    for keyword in keywords:
-        normalized_keyword = str(keyword).lower()
-        if normalized_keyword and normalized_keyword in lowered:
-            matches.append(str(keyword))
     return matches
 
 
@@ -436,7 +504,11 @@ def _unique_run_id(delta_dir: Path, base: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run one Phase 1 local ingestion pass.")
-    parser.add_argument("--root", default=".", help="Project root. Defaults to the current directory.")
+    parser.add_argument(
+        "--root",
+        default=_default_root(),
+        help="Project root. Defaults to $LOOPING_BOX_ROOT, else the current directory.",
+    )
     parser.add_argument("--input-dir", default="inbox", help="Directory to scan for local input files.")
     parser.add_argument(
         "--sop",
@@ -452,14 +524,21 @@ def main() -> int:
     parser.add_argument("--staging-dir", default="staging", help="Directory for pending review payloads.")
     args = parser.parse_args()
 
-    delta = run_phase1(
-        args.root,
-        input_dir=args.input_dir,
-        sop_path=args.sop,
-        state_path=args.state,
-        delta_dir=args.delta_dir,
-        staging_dir=args.staging_dir,
-    )
+    try:
+        delta = run_phase1(
+            args.root,
+            input_dir=args.input_dir,
+            sop_path=args.sop,
+            state_path=args.state,
+            delta_dir=args.delta_dir,
+            staging_dir=args.staging_dir,
+        )
+    except RuntimeError as exc:  # another phase1/supervisor/review holds the lock
+        print(f"busy: {exc}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as exc:
+        print(f"error: {exc.filename} not found. Is this a workspace? Try: looping-box init", file=sys.stderr)
+        return 1
 
     print(f"delta: {delta['delta_path'] or 'none'}")
     print(
@@ -468,8 +547,11 @@ def main() -> int:
         f"{delta['summary']['skipped']} skipped, "
         f"review={delta['boundary_gate']['status']}"
     )
+    for warning in delta.get("warnings", []):
+        print(f"warning: {warning['relative_path']}: {warning['message']}", file=sys.stderr)
     if delta["boundary_gate"]["status"] == "pending_review":
-        print("\aBOUNDARY GATE: review required before outward action.")
+        bell = "\a" if sys.stdout.isatty() else ""  # no control chars in pipes/logs
+        print(f"{bell}BOUNDARY GATE: review required before outward action.")
         print(f"payload: {delta['boundary_gate']['payload']}")
     return 0
 

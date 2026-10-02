@@ -11,7 +11,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from looping_box.phase1 import run_phase1
 from looping_box.schema import validate
-from looping_box.supervisor import _release_lock, load_world_state, run_supervisor, status_summary
+from looping_box._util import release_lock as _release_lock
+from looping_box.supervisor import load_world_state, run_supervisor, status_summary
 from looping_box import supervisor
 
 SCHEMA_DIR = ROOT / "docs" / "schemas"

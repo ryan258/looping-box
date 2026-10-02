@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,9 @@ from looping_box.action_policy import classify_action
 from looping_box.phase1 import run_phase1
 from looping_box.review import list_reviews, record_review
 from looping_box.schema import validate
+
+# Decision records are HMAC-signed; tests must never touch ~/.config.
+os.environ["LOOPING_BOX_REVIEW_KEY"] = "test-review-key"
 
 SCHEMA_DIR = ROOT / "docs" / "schemas"
 REVIEW_RECORD_SCHEMA = json.loads((SCHEMA_DIR / "review_record.schema.json").read_text())
@@ -76,12 +80,18 @@ class ReviewTests(unittest.TestCase):
             )
 
             second = run_phase1(root, now="2026-06-24T12:10:00Z")
+            third = run_phase1(root, now="2026-06-24T12:11:00Z")
 
             self.assertEqual(first["boundary_gate"]["status"], "pending_review")
             self.assertEqual(second["boundary_gate"]["status"], "clear")
-            self.assertEqual(second["summary"]["changed"], 0)
-            self.assertEqual(second["summary"]["skipped"], 1)
-            self.assertEqual(second["skipped"][0]["reason"], "review_decision_recorded")
+            # The approval releases the item once, as ordinary (ungated) work...
+            self.assertEqual(second["summary"]["changed"], 1)
+            self.assertEqual(second["changes"][0]["review_reasons"], [])
+            self.assertEqual(second["changes"][0]["approved_review"], review["review_id"])
+            # ...and is then a recorded decision, never re-released or re-gated.
+            self.assertEqual(third["summary"]["changed"], 0)
+            self.assertEqual(third["summary"]["skipped"], 1)
+            self.assertEqual(third["skipped"][0]["reason"], "review_decision_recorded")
             self.assertEqual(list_reviews(root), [])
             index = json.loads((root / "staging" / "pending_review.json").read_text())
             self.assertEqual(index["reviews"], [])

@@ -100,6 +100,8 @@ def complete(
         raw = _transport(f"{base_url}/chat/completions", headers, body, timeout)
         data = json.loads(raw)
         text = data["choices"][0]["message"]["content"]
+        if not isinstance(text, str):  # refusals / tool calls come back as null content
+            raise ValueError("response had no text content")
     except Exception as exc:  # network, JSON, or unexpected provider shape
         raise ModelError(f"{role} model call failed: {exc}") from exc
     # temperature=0 is requested, but providers don't guarantee determinism, so

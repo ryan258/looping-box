@@ -102,6 +102,8 @@ def _run_context_builder(
                 "excerpt": change.get("excerpt", ""),
                 "source_delta": relative_delta,
             }
+            if change.get("approved_review"):
+                normalized["approved_review"] = change["approved_review"]
             review_reasons = list(change.get("review_reasons", []))
             if review_reasons:
                 blocked = dict(normalized)
@@ -181,6 +183,7 @@ def _run_context_builder(
     )
 
     if not dry_run:
+        _archive_previous(output_dir, ("context_package.json", "context_package.md"))
         _write_json(context_path, context)
         markdown_path.write_text(_context_markdown(context), encoding="utf-8")
         state["consumed_inputs"].extend(source_deltas)
@@ -233,17 +236,10 @@ def _run_execution_engine(
 
     context = _read_json(context_path)
     source_deltas = list(context.get("source_deltas", []))
-    if context.get("status") == "blocked":
-        output = _worker_output(
-            "execution_engine",
-            generated_at,
-            "blocked",
-            source_deltas,
-            [],
-            [{"code": "blocked_context", "message": "context package has blocked inputs"}],
-        )
-        _persist_worker_output(root_path, output_dir, output, dry_run)
-        return output
+    # Gating is per item: `items` never contains a boundary-gated input, so a
+    # blocked package still drafts its clean items. Held inputs are recorded in
+    # the draft and stay blocked at the supervisor until a human decides.
+    held_for_review = [item.get("relative_path", "") for item in context.get("blocked_inputs", [])]
 
     draft_path = output_dir / "draft.json"
     draft_markdown_path = output_dir / "draft.md"
@@ -271,6 +267,7 @@ def _run_execution_engine(
         "source_context": _rel(root_path, context_path),
         "source_context_sha256": context_hash,
         "items": draft_items,
+        "held_for_review": held_for_review,
     }
     artifacts = [_rel(root_path, draft_path), _rel(root_path, draft_markdown_path)]
     output = _worker_output(
@@ -283,6 +280,7 @@ def _run_execution_engine(
     )
 
     if not dry_run:
+        _archive_previous(output_dir, ("draft.json", "draft.md"))
         _write_json(draft_path, draft)
         draft_markdown_path.write_text(_draft_markdown(draft), encoding="utf-8")
         state["last_context_sha256"] = context_hash
@@ -361,11 +359,14 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _offline_draft_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    drafted = {
         "relative_path": item.get("relative_path", ""),
         "matched_routes": list(item.get("matched_routes", [])),
         "draft": item.get("excerpt", ""),
     }
+    if item.get("approved_review"):
+        drafted["approved_review"] = item["approved_review"]  # keep the decision trail
+    return drafted
 
 
 def _draft_item(
@@ -431,6 +432,36 @@ def _persist_worker_output(
     _write_json(output_dir / "last_output.json", output)
 
 
+def _archive_previous(output_dir: Path, names: tuple[str, ...]) -> None:
+    """Move the prior batch's artifacts into history/ before they are overwritten.
+
+    Each cycle writes the "latest" package/draft; without this, a later (or empty)
+    batch would silently erase the earlier batch's output. Artifacts with no items
+    are just overwritten, so a pending review that re-surfaces every run cannot
+    grow history/ without bound.
+    """
+    primary = output_dir / names[0]
+    if primary.exists():
+        try:
+            if not _read_json(primary).get("items"):
+                return
+        except (OSError, ValueError):
+            pass  # unreadable previous artifact: keep it in history
+    history = output_dir / "history"
+    for name in names:
+        path = output_dir / name
+        if not path.exists():
+            continue
+        history.mkdir(parents=True, exist_ok=True)
+        stamp = int(path.stat().st_mtime)
+        target = history / f"{stamp}-{name}"
+        suffix = 2
+        while target.exists():
+            target = history / f"{stamp}-{suffix}-{name}"
+            suffix += 1
+        path.replace(target)
+
+
 def _quarantine_delta(delta_path: Path) -> Path:
     quarantine_path = delta_path.with_name(f"{delta_path.name}.bad")
     suffix = 2
@@ -479,9 +510,14 @@ def _draft_markdown(draft: dict[str, Any]) -> str:
     for item in draft["items"]:
         lines.append(f"## {item['relative_path']}")
         lines.append("")
+        if item.get("approved_review"):
+            lines.append(f"_Released by approved review {item['approved_review']}._")
+            lines.append("")
         lines.append(item["draft"])
         lines.append("")
-    return "\n".join(lines)
+    for path in draft.get("held_for_review", []):
+        lines.append(f"- HELD for review: {path}")
+    return "\n".join(lines) + "\n"
 
 
 def _run_suffix(generated_at: str) -> str:

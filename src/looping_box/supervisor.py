@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
+import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ._util import (
+    append_audit as _append_audit_event,
+    default_root as _default_root,
+    project_lock as _project_lock,
     read_json as _read_json,
     rel as _rel,
     resolve_under_root as _resolve_under_root,
@@ -18,6 +20,7 @@ from ._util import (
     write_json as _write_json,
 )
 from .phase1 import DELTA_SCHEMA
+from .review import list_reviews
 from .worker import run_worker
 
 
@@ -43,13 +46,8 @@ def run_supervisor(root: Path | str, *, now: str | None = None) -> dict[str, Any
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
     config = _read_config(root_path)
-    lock_path = _resolve_under_root(root_path, ".looping_box.lock")
-    _acquire_lock(lock_path, generated_at, int(config.get("stale_lock_seconds", 300)))
-    try:
-        result = _run_supervisor_locked(root_path, generated_at, config)
-    finally:
-        _release_lock(lock_path, os.getpid())
-    return result
+    with _project_lock(root_path, generated_at, int(config.get("stale_lock_seconds", 300))):
+        return _run_supervisor_locked(root_path, generated_at, config)
 
 
 def load_world_state(root: Path | str) -> dict[str, Any]:
@@ -78,6 +76,15 @@ def status_summary(root: Path | str) -> str:
     root_path = Path(root).resolve()
     state = load_world_state(root_path)
     recovery = state["recovery"]
+    # Live pending reviews, not just the last supervisor run: a gate trip or an
+    # approval is visible here immediately.
+    pending = list_reviews(root_path)
+    pending_line = [f"pending reviews: {len(pending)} (looping-box-review list)"] if pending else []
+    unverifiable = sum(1 for review in pending if review.get("unverifiable_decision"))
+    if unverifiable:
+        pending_line.append(
+            f"warning: {unverifiable} decision record(s) did not verify (run: looping-box-review key)"
+        )
     if recovery.get("operator_action_required"):
         payload = recovery.get("pending_review_payload") or "cache/supervisor/blocked.json"
         # Resource-limit blocks (see docs/RECOVERY.md) have no source file to
@@ -90,20 +97,28 @@ def status_summary(root: Path | str) -> str:
                 "looping-box-supervisor --once"
             )
         else:
-            next_step = "inspect the pending payload, handle the source file, then run ./startday.sh"
+            next_step = (
+                "decide each pending review (looping-box-review approve|reject), or handle "
+                "the source file, then run ./startday.sh"
+            )
         return "\n".join(
-            [
-                "status: operator action required",
-                f"pending: {payload}",
-                f"Next: {next_step}",
-            ]
+            ["status: operator action required", f"pending: {payload}", *pending_line, f"Next: {next_step}"]
         )
     if recovery.get("last_error"):
         return "\n".join(
             [
                 "status: failed",
                 f"error: {recovery['last_error']}",
+                *pending_line,
                 "Next: fix the error and run looping-box-supervisor --once",
+            ]
+        )
+    if pending:
+        return "\n".join(
+            [
+                "status: operator action required",
+                *pending_line,
+                "Next: decide each pending review, then run ./startday.sh",
             ]
         )
     return "\n".join(
@@ -146,7 +161,7 @@ def _run_supervisor_locked(
     # undo that would silently self-heal on the next run with no operator action.
     # Snapshot worker-local state and artifacts before each run and restore them
     # if we end up blocking.
-    ran_workers: dict[str, dict[str, bytes] | None] = {}
+    ran_workers: dict[str, tuple[dict[str, bytes], set[str]] | None] = {}
     if new_deltas and _can_route(config, "phase1_delta", "context_builder"):
         plan.append("context_builder")
 
@@ -167,8 +182,11 @@ def _run_supervisor_locked(
                 root, state, generated_at, "worker_timeout",
                 context_output["errors"][0]["message"], new_delta_refs, ran_workers,
             )
+        # A context_builder that went idle (its delta was already consumed) must
+        # not strand execution: after an execution failure the retry has nothing
+        # new for context_builder, but execution still needs to run.
         if (
-            context_output["status"] in {"complete", "blocked"}
+            (context_output["status"] in {"complete", "blocked"} or _execution_needs_context(root))
             and _can_route(config, "context_builder", "execution_engine")
             and "execution_engine" not in plan
         ):
@@ -220,7 +238,7 @@ def _run_supervisor_locked(
         "worker_outputs": worker_outputs,
         "recovery": state["recovery"],
     }
-    _append_audit(root, generated_at, result)
+    _append_audit(root, generated_at, result, new_delta_refs)
     return result
 
 
@@ -228,24 +246,48 @@ def _worker_dir(root: Path, worker_id: str) -> Path:
     return _resolve_under_root(root, f"cache/workers/{worker_id}")
 
 
-def _snapshot_worker_dir(root: Path, worker_id: str) -> dict[str, bytes] | None:
+def _snapshot_worker_dir(
+    root: Path, worker_id: str
+) -> tuple[dict[str, bytes], set[str]] | None:
+    """Capture a worker dir: file bytes for everything except history/, and only the
+    *names* of history files (history only ever grows, so it is never rewound and
+    never held in memory)."""
     path = _worker_dir(root, worker_id)
     if not path.exists():
         return None
-    snapshot: dict[str, bytes] = {}
+    files: dict[str, bytes] = {}
+    history: set[str] = set()
     for child in path.rglob("*"):
         if child.is_file() and not child.is_symlink():
-            snapshot[child.relative_to(path).as_posix()] = child.read_bytes()
-    return snapshot
+            relative = child.relative_to(path).as_posix()
+            if relative.startswith("history/"):
+                history.add(relative)
+            else:
+                files[relative] = child.read_bytes()
+    return files, history
 
 
-def _restore_worker_dir(root: Path, worker_id: str, snapshot: dict[str, bytes] | None) -> None:
+def _restore_worker_dir(
+    root: Path, worker_id: str, snapshot: tuple[dict[str, bytes], set[str]] | None
+) -> None:
     path = _worker_dir(root, worker_id)
-    if path.exists():
-        shutil.rmtree(path)
     if snapshot is None:
+        if path.exists():
+            shutil.rmtree(path)
         return
-    for relative_path, content in snapshot.items():
+    files, history = snapshot
+    if path.exists():
+        # Remove everything the blocked run wrote, including history it created;
+        # history that existed before the run stays.
+        for child in sorted(path.rglob("*"), reverse=True):
+            if child.is_dir() and not child.is_symlink():
+                try:
+                    child.rmdir()
+                except OSError:
+                    pass  # still holds preserved history
+            elif child.relative_to(path).as_posix() not in history:
+                child.unlink()
+    for relative_path, content in files.items():
         target = path / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
@@ -264,7 +306,7 @@ def _blocked_with_rollback(
     reason: str,
     message: str,
     source_deltas: list[str],
-    ran_workers: dict[str, dict[str, bytes] | None],
+    ran_workers: dict[str, tuple[dict[str, bytes], set[str]] | None],
 ) -> dict[str, Any]:
     # Undo state and artifacts each ran worker already persisted so the audit
     # trail matches the rolled-back world state.
@@ -316,7 +358,7 @@ def _blocked(
         "worker_outputs": [],
         "recovery": state["recovery"],
     }
-    _append_audit(root, generated_at, result)
+    _append_audit(root, generated_at, result, source_deltas)
     return result
 
 
@@ -531,69 +573,29 @@ def _pending_payload_from_context(root: Path) -> str | None:
     return None
 
 
-def _append_audit(root: Path, generated_at: str, result: dict[str, Any]) -> None:
-    audit_path = _resolve_under_root(root, "logs/transactions/supervisor.jsonl")
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    event = {
-        "schema": "looping-box.audit-event.v1",
-        "generated_at": generated_at,
-        "event": "supervisor.run",
-        "status": result["status"],
-        "plan": result["plan"],
-    }
-    with audit_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
-
-
-def _acquire_lock(lock_path: Path, generated_at: str, stale_lock_seconds: int) -> None:
-    try:
-        _write_lock_exclusive(lock_path, generated_at)
-        return
-    except FileExistsError:
-        pass
-
-    try:
-        lock = _read_json(lock_path)
-        age = (_parse_time(generated_at) - _parse_time(lock["created_at"])).total_seconds()
-    except (KeyError, ValueError, json.JSONDecodeError):
-        age = 0
-    if age <= stale_lock_seconds:
-        raise RuntimeError(f"active supervisor lock: {lock_path}")
-
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
-    try:
-        _write_lock_exclusive(lock_path, generated_at)
-    except FileExistsError as exc:
-        raise RuntimeError(f"active supervisor lock: {lock_path}") from exc
-
-
-def _write_lock_exclusive(lock_path: Path, generated_at: str) -> None:
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("x", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps({"created_at": generated_at, "pid": os.getpid()}, sort_keys=True) + "\n"
-        )
-
-
-def _release_lock(lock_path: Path, expected_pid: int) -> None:
-    try:
-        lock = _read_json(lock_path)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return
-    if lock.get("pid") == expected_pid:
-        lock_path.unlink(missing_ok=True)
-
-
-def _parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+def _append_audit(root: Path, generated_at: str, result: dict[str, Any], source_deltas: list[str]) -> None:
+    _append_audit_event(
+        root,
+        "supervisor",
+        {
+            "event": "supervisor.run",
+            "generated_at": generated_at,
+            "status": result["status"],
+            "plan": result["plan"],
+            "source_deltas": source_deltas,
+            "worker_statuses": {o["worker_id"]: o["status"] for o in result["worker_outputs"]},
+            "blocked_reason": result["recovery"].get("blocked_reason"),
+        },
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run or inspect the Looping Box supervisor.")
-    parser.add_argument("--root", default=".", help="Project root. Defaults to the current directory.")
+    parser.add_argument(
+        "--root",
+        default=_default_root(),
+        help="Project root. Defaults to $LOOPING_BOX_ROOT, else the current directory.",
+    )
     parser.add_argument("--once", action="store_true", help="Run one supervisor pass.")
     parser.add_argument("--status", action="store_true", help="Print supervisor status.")
     args = parser.parse_args()
@@ -603,7 +605,11 @@ def main() -> int:
         return 0
     if not args.once:
         parser.error("pass --once to run a supervisor pass, or --status to inspect state")
-    result = run_supervisor(args.root)
+    try:
+        result = run_supervisor(args.root)
+    except RuntimeError as exc:  # another phase1/supervisor/review holds the lock
+        print(f"busy: {exc}", file=sys.stderr)
+        return 1
     print(f"status: {result['status']}")
     print(f"plan: {', '.join(result['plan']) if result['plan'] else 'none'}")
     if result["recovery"]["operator_action_required"]:
