@@ -12,7 +12,7 @@ echo "Project docs: summarize the readme and the backlog." > "${LOOPING_BOX_ROOT
 
 echo "Running the loop..."
 echo
-"${ROOT_DIR}/startday.sh"
+startday
 
 echo
 echo "------------------------------------------------------------"

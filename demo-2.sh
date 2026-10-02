@@ -13,7 +13,7 @@ echo "Please deploy the release and send the announcement email." > "${LOOPING_B
 
 echo "Running the loop..."
 echo
-"${ROOT_DIR}/startday.sh"
+startday
 
 echo
 echo "------------------------------------------------------------"

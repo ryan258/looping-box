@@ -7,11 +7,12 @@ export LOOPING_BOX_REVIEW_KEY="demo-key-not-a-secret"
 
 lb() {  # lb <phase1|supervisor|review|worker> [args...]
   local tool="$1"; shift
-  if command -v "looping-box-${tool}" >/dev/null 2>&1; then
-    "looping-box-${tool}" "$@"
-  else
-    PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m "looping_box.${tool}" "$@"
-  fi
+  PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m "looping_box.${tool}" "$@"
+}
+
+# startday.sh exits 2 when something is held for a human; that is the expected outcome here.
+startday() {
+  "${ROOT_DIR}/startday.sh" || [ $? -eq 2 ]
 }
 
 demo_reset() {

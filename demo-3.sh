@@ -26,7 +26,7 @@ if LOOPING_BOX_ALLOW_NONINTERACTIVE=1 lb review approve "${REVIEW_ID}" --note "C
   echo
   echo "Running the loop one more time..."
   echo
-  "${ROOT_DIR}/startday.sh"
+  startday
   echo
   echo "------------------------------------------------------------"
   echo "It now reads 'review=clear' and the approved item was processed once."
