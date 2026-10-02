@@ -69,10 +69,11 @@ signing key differs from the one that signed the decision.
 `logs/transactions/*.jsonl` are hash-chained. Check them with:
 
 ```sh
-looping-box-review audit
+looping-box review audit
+# or: looping-box report (includes activity summary + audit integrity)
 ```
 
-It prints `ok` or `BROKEN at line N` per log (exit 1 if any is broken). Lines
+It prints `ok` (or `intact`) or `BROKEN at line N` per log (exit 1 if any is broken). Lines
 written before chaining existed report as a break at line 1: archive the old file
 and start fresh.
 

@@ -6,6 +6,28 @@ supervisor pass, which archives observed deltas, so the helper below looks in
 `cache/deltas/archive/` too. For hands-off, repeatable runs use `./demo-1.sh` ..
 `./demo-3.sh`, which work in a throwaway workspace.
 
+## Use-case demos
+
+One runnable script per use-case section of
+[101-ways-to-use-this-project-for-fun-and-profit.md](101-ways-to-use-this-project-for-fun-and-profit.md#the-winners-runnable).
+Each runs in its own throwaway workspace and is repeatable; `./demos/run-all.sh` runs
+all nine.
+
+| Demo | Script | Shows |
+|---|---|---|
+| A. What do I owe people? | [a-owed-list.sh](../demos/a-owed-list.sh) | Meeting notes sorted into drafted and held follow-ups |
+| B. Agent pre-flight | [b-agent-preflight.sh](../demos/b-agent-preflight.sh) | Risky agent plans held; `blocked` class refuses a casual approve |
+| C. Tamper evidence | [c-tamper-evidence.sh](../demos/c-tamper-evidence.sh) | Edited log or record is detected |
+| D. Overclaim tripwire | [d-overclaim-tripwire.sh](../demos/d-overclaim-tripwire.sh) | Custom gate words; editing the text clears the hold |
+| E. CI gate | [e-ci-gate.sh](../demos/e-ci-gate.sh) | Exit code `2` as a human sign-off step |
+| F. Evasion lab | [f-evasion-lab.sh](../demos/f-evasion-lab.sh) | What the gate catches and what it misses |
+| G. Gate tuning | [g-gate-tuning.sh](../demos/g-gate-tuning.sh) | Measured before/after on a client's incidents |
+| H. Dungeon Master's table | [h-dm-table.sh](../demos/h-dm-table.sh) | Forbidden class, approvals with notes, log as record |
+| I. Report | [i-report.sh](../demos/i-report.sh) | `looping-box report` summary |
+
+The numbered demos below are the older step-by-step walkthroughs that run in this repo's
+own workspace.
+
 Runtime outputs (state, deltas, worker output, verifier results, staging records,
 logs) and everything in `inbox/` except `.gitkeep` are ignored by git.
 

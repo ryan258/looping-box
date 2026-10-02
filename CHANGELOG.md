@@ -50,6 +50,10 @@ Fixes from a second full review. Written and statically checked (ruff); the new
   must be http(s); a provider `error` body is a readable `ModelError`; excerpts in prompts
   are delimited and marked as untrusted data.
 
+**New**
+- `looping-box report [--since DATE]`: phase 1/supervisor activity, every decision (who, when, note), pending count, and audit-chain integrity as markdown. Exit 1 if a chain is broken.
+- `demos/`: one runnable demo per use-case section of `docs/101-ways-to-use-this-project-for-fun-and-profit.md`.
+
 **Housekeeping**
 - `docs/UPDATE-IDEAS.md` moved to `docs/history/`; removed an unused schema constant and a
   duplicated payload-schema constant.

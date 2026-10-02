@@ -16,6 +16,7 @@ echo "Project docs: summarize the backlog." > inbox/notes.txt
 looping-box run                      # ingest (phase 1) + one supervisor pass  (== ./startday.sh)
 looping-box status
 looping-box doctor                   # read-only health check with remedies
+looping-box report                   # audit logs + decisions as one markdown summary
 ```
 
 `looping-box` also fronts `review`, `worker`, `phase1` and `supervisor`
@@ -42,6 +43,8 @@ workspace directory (every CLI honors it, as does `--root`).
 
 Hands-on walkthroughs: `./demo-1.sh`, `./demo-2.sh`, `./demo-3.sh` (each runs in a
 throwaway workspace and is repeatable) and [docs/DEMOS.md](docs/DEMOS.md).
+Nine use-case demos (`./demos/run-all.sh`): see
+[docs/101-ways-to-use-this-project-for-fun-and-profit.md](docs/101-ways-to-use-this-project-for-fun-and-profit.md).
 
 ## Reviewing held items
 

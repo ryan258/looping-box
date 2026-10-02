@@ -41,7 +41,9 @@ Each script resets a throwaway workspace (so it is repeatable and never touches
 your real inbox), drops the example file, runs the loop, and prints what to say.
 `demo-3.sh` approves the item `demo-2.sh` left waiting, so run 2 then 3. The
 step-by-step versions below are there if you'd rather narrate each command; they
-use the real workspace, so use the reset at the bottom between prospects.
+use the real workspace, so use the reset at the bottom between prospects. For
+specialized scenarios (agent pre-flight, CI gates, evasion, audit reports), see
+the nine use-case demos (`./demos/run-all.sh`) in [DEMOS.md](DEMOS.md).
 
 ---
 

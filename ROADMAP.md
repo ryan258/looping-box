@@ -16,9 +16,9 @@ phantom-review fix, gate gaps, approval hardening, exit codes). All tests pass l
 decide the LICENSE, then cut 0.1.0 before starting anything below.
 
 ## Adoption (after the release above)
-- `[x]` `looping-box` umbrella CLI (`run`, `status`, `review`, `worker`, `doctor`, `init`); `report` still open. **S**
+- `[x]` `looping-box` umbrella CLI (`run`, `status`, `review`, `worker`, `doctor`, `init`, `report`). **S**
 - `[x]` `looping-box doctor`: config drift, locks, recovery state, pending/unverifiable reviews, quarantined deltas, key and `.env` permissions, audit chain. Model reachability (network) is deliberately not checked. **S**
-- `[ ]` `looping-box report [--since]`: audit-log + decisions as one markdown summary. **S**
+- `[x]` `looping-box report [--since]`: audit-log + decisions as one markdown summary. **S**
 - `[x]` `looping-box init` scaffold (defaults bundled as package data). **S**
 - `[ ]` PyPI publication: blocked on a LICENSE decision (and a `license` field in pyproject). **S**
 - `[ ]` Model layer: retries/backoff + fallback chain, token/cost accounting, response cache, prompts in `config/prompts/`. **M**
