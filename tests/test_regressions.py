@@ -24,6 +24,7 @@ from looping_box._util import utc_now
 from looping_box.action_policy import match_keywords
 from looping_box.doctor import run_doctor
 from looping_box.phase1 import run_phase1
+from looping_box.report import build_report
 from looping_box.review import list_reviews, record_review
 from looping_box.supervisor import run_supervisor
 
@@ -277,6 +278,24 @@ class ModelLayerLimitTests(unittest.TestCase):
             model._env_loaded_for.add(str(Path(tmp).resolve()))
             with self.assertRaisesRegex(model.ModelError, "rate limited"):
                 model.complete("verifier", "hi", root=tmp)
+
+
+class ReportTests(unittest.TestCase):
+    def test_report_summarizes_decisions_and_chain_integrity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = _gated(root)
+            record_review(
+                root, review["review_id"], "rejected", note="not now | later", approver="ryan", now="2026-06-24T12:05:00Z"
+            )
+
+            text = build_report(root)
+
+            for expected in ("phase 1 runs: 1", "rejected", "ryan", "not now \\| later", "phase1.jsonl: intact", "review.jsonl: intact"):
+                self.assertIn(expected, text)
+            later = build_report(root, since="2099-01-01")
+            self.assertIn("since 2099-01-01", later)
+            self.assertNotIn("ryan", later)
 
 
 class DoctorTests(unittest.TestCase):

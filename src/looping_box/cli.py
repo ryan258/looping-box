@@ -6,7 +6,7 @@ import argparse
 import sys
 from typing import Callable
 
-from . import doctor, phase1, review, scaffold, supervisor, worker
+from . import doctor, phase1, report, review, scaffold, supervisor, worker
 from ._util import default_root
 
 USAGE = """usage: looping-box <command> [args]
@@ -17,6 +17,7 @@ USAGE = """usage: looping-box <command> [args]
   review <sub>          list | show | approve | reject | key | audit
   worker <id>           run one worker pass (context_builder | execution_engine)
   doctor                read-only health check with remedies
+  report [--since D]    audit logs and decisions as one markdown summary
   phase1, supervisor    low-level entry points (same flags as looping-box-phase1 / -supervisor)
 
 Set LOOPING_BOX_ROOT (or pass --root) to choose the workspace.
@@ -28,6 +29,7 @@ _TOOLS: dict[str, Callable[[], int]] = {
     "review": review.main,
     "worker": worker.main,
     "doctor": doctor.main,
+    "report": report.main,
     "init": scaffold.main,
 }
 
