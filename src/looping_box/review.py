@@ -27,9 +27,9 @@ from ._util import (
     verify_audit_chain as _verify_audit_chain,
     write_json as _write_json,
 )
+from .action_policy import classify_reasons
+from .phase1 import REVIEW_PAYLOAD_SCHEMA, _review_id
 
-
-REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
 REVIEW_RECORD_SCHEMA = "looping-box.review-record.v2"
 VERIFIER_RESULT_SCHEMA = "looping-box.verifier-result.v1"
 
@@ -124,9 +124,18 @@ def _record_review_locked(
         raise ValueError(f"review signing key is unavailable ({_key_status()})")
     verifier_result: str | None = None
     if decision == "approved":
-        if payload.get("action_class") == "forbidden":
+        # The payload file is unsigned, so trust neither its action_class nor its
+        # reasons: the review id commits to (path, hash, reasons), and the class is
+        # recomputed from current config. A hand-edited payload cannot downgrade it.
+        items = payload.get("source_items", [])
+        if _review_id(items) != review_id:
+            raise ValueError(f"review payload does not match its id (edited?): {review_id}")
+        action_class = classify_reasons(
+            root_path, [reason for item in items for reason in item.get("review_reasons", [])]
+        )
+        if action_class == "forbidden":
             raise ValueError(f"forbidden review cannot be approved: {review_id}")
-        if payload.get("action_class") == "blocked" and not allow_blocked:
+        if action_class == "blocked" and not allow_blocked:
             raise ValueError(
                 f"blocked review needs an explicit override (--allow-blocked): {review_id}"
             )
@@ -308,6 +317,11 @@ def _append_review_audit(root: Path, record: dict[str, Any]) -> None:
     )
 
 
+def _env_flag(name: str) -> bool:
+    """True only for an explicit yes ("1", "true", "yes", "on"); "0" or "" is off."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect or record Looping Box review decisions.")
     parser.add_argument(
@@ -361,7 +375,7 @@ def main() -> int:
     if args.command == "approve":
         # Approvals are a human act. This is friction, not a security boundary
         # (a same-user process can still set the override), but it is recorded.
-        if not interactive and not os.environ.get("LOOPING_BOX_ALLOW_NONINTERACTIVE"):
+        if not interactive and not _env_flag("LOOPING_BOX_ALLOW_NONINTERACTIVE"):
             print(
                 "declined: approvals need an interactive terminal "
                 "(set LOOPING_BOX_ALLOW_NONINTERACTIVE=1 to override; it is recorded)",

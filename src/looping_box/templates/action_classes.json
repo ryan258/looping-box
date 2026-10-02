@@ -35,6 +35,19 @@
       "bank transfer",
       "| sh",
       "| bash",
+      "rm -fr",
+      "rm -r",
+      "chmod 777",
+      "drop database",
+      "post to",
+      "tweet",
+      "transfer",
+      "wire",
+      "pay",
+      "payment",
+      "invoice",
+      "merge",
+      "upload",
       "oversized_input"
     ],
     "blocked": [
@@ -43,7 +56,12 @@
       "production",
       "password",
       "api key",
-      "private key"
+      "private key",
+      "access token",
+      "auth token",
+      "bearer",
+      "ssh key",
+      "apikey"
     ],
     "forbidden": []
   }

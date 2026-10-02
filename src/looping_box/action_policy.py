@@ -41,9 +41,34 @@ DEFAULT_ACTION_CLASSES = {
             "bank transfer",
             "| sh",
             "| bash",
+            "rm -fr",
+            "rm -r",
+            "chmod 777",
+            "drop database",
+            "post to",
+            "tweet",
+            "transfer",
+            "wire",
+            "pay",
+            "payment",
+            "invoice",
+            "merge",
+            "upload",
             "oversized_input",
         ],
-        "blocked": ["credential", "secret", "production", "password", "api key", "private key"],
+        "blocked": [
+            "credential",
+            "secret",
+            "production",
+            "password",
+            "api key",
+            "private key",
+            "access token",
+            "auth token",
+            "bearer",
+            "ssh key",
+            "apikey",
+        ],
         "forbidden": [],
     },
 }
@@ -55,8 +80,10 @@ DEFAULT_ACTION_CLASSES = {
 # characters stripped, case-folded, common look-alike letters mapped, spaced-out
 # letters collapsed) and whole-word with simple inflections, so "deployed" and
 # "send_email" trip it but "committee", "resend the sender list" and
-# "reproduction" do not. List explicit forms (e.g. "deployment", "resend") in the
-# SOP when a bare keyword's inflections are not enough.
+# "reproduction" do not. Underscores read as spaces (so `api_key` trips "api key")
+# and a space next to punctuation is optional (so `curl x|sh` trips "| sh"). List
+# explicit forms (e.g. "deployment", "resend") in the SOP when a bare keyword's
+# inflections are not enough.
 
 # ponytail: a hand-picked set of Cyrillic/Greek look-alikes, not the full Unicode
 # confusables table. Swap that in if homoglyph evasion becomes a real concern.
@@ -75,8 +102,9 @@ _SPACED_LETTERS = re.compile(r"(?<!\w)(?:\w[ ._\-*]){2,}\w(?!\w)")
 
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-    return " ".join(text.casefold().translate(_LOOKALIKES).split())
+    # NUL too: UTF-16 text read as UTF-8 interleaves NULs between the letters.
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf" and ch != "\x00")
+    return " ".join(text.casefold().translate(_LOOKALIKES).replace("_", " ").split())
 
 
 def _collapse_spaced_letters(text: str) -> str:
@@ -91,14 +119,23 @@ def _keyword_pattern(keyword: str) -> re.Pattern[str] | None:
     word = normalize_text(keyword)
     if not word:
         return None
-    base = re.escape(word).replace("\\ ", " ")
+    tokens = word.split(" ")
+    base = re.escape(tokens[0])
+    for before, after in zip(tokens, tokens[1:]):
+        # A space between two word characters is required; next to punctuation
+        # ("| sh") it is optional, so "x|sh" still matches.
+        required = before[-1].isalnum() and after[0].isalnum()
+        base += (" " if required else " ?") + re.escape(after)
     forms = [base + r"(?:s|es|d|ed|ing)?"]
     if word.endswith("e"):
         forms.append(re.escape(word[:-1]) + "ing")  # delete -> deleting
     if word[-1] in "tpdgn":
         forms.append(base + re.escape(word[-1]) + "(?:ed|ing)")  # commit -> committed
-    # Word boundary on letters/digits only, so snake_case identifiers still match.
-    return re.compile(r"(?<![^\W_])(?:" + "|".join(forms) + r")(?![^\W_])")
+    # Word boundary on letters/digits only, and only where the keyword itself starts
+    # or ends with one, so "|sh" can follow a word and "| sh" cannot match "| shell".
+    head = r"(?<![^\W_])" if word[0].isalnum() else ""
+    tail = r"(?![^\W_])" if word[-1].isalnum() else ""
+    return re.compile(head + "(?:" + "|".join(forms) + ")" + tail)
 
 
 def match_keywords(text: str, keywords: list[str]) -> list[str]:

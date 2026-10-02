@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import sys
@@ -12,11 +13,9 @@ from ._util import (
     append_audit as _append_audit,
     decision_state as _decision_state,
     key_status as _key_status,
-    decision_record_exists as _decision_record_exists,
     default_root as _default_root,
     project_lock as _project_lock,
     read_json as _read_json,
-    read_pending_review_index as _read_pending_review_index,
     rel as _rel,
     resolve_under_root as _resolve_under_root,
     sha256_file as _sha256_file,
@@ -28,7 +27,6 @@ from .action_policy import classify_reasons, match_keywords as _match_keywords
 
 STATE_SCHEMA = "looping-box.phase1.state.v1"
 DELTA_SCHEMA = "looping-box.phase1.delta.v1"
-BOUNDARY_SCHEMA = "looping-box.boundary-review.v1"
 REVIEW_PAYLOAD_SCHEMA = "looping-box.review-payload.v1"
 DEFAULT_MAX_FILE_BYTES = 1_000_000
 
@@ -107,10 +105,10 @@ def _run_phase1_locked(
             # prompt; a human decides whether it is processed at all.
             text, matched_routes, review_reasons = "", [], ["oversized_input"]
         else:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
+            text = _read_text(file_path)
             matched_routes = _match_routes(text, sop.get("routes", []))
             review_reasons = _match_keywords(
-                text,
+                _gate_text(file_path, text),
                 sop.get("boundary_gate", {}).get("requires_review_keywords", []),
             )
 
@@ -243,6 +241,29 @@ def _run_phase1_locked(
     return delta
 
 
+def _read_text(path: Path) -> str:
+    """Decode an input for gating and excerpts. UTF-16 (BOM) is decoded properly and
+    stray NULs are dropped, so a UTF-16 file cannot hide its words from the gate."""
+    data = path.read_bytes()
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = data.decode("utf-16", errors="replace")
+    else:
+        text = data.decode("utf-8", errors="replace")
+    return text.replace("\x00", "")
+
+
+def _gate_text(path: Path, text: str) -> str:
+    """Text the keyword gate sees: the raw text, plus (for .json) the decoded string
+    values, so `\\u0064eploy` in a JSON file reads as "deploy"."""
+    if path.suffix.lower() != ".json":
+        return text
+    try:
+        decoded = json.dumps(json.loads(text), ensure_ascii=False)
+    except (ValueError, RecursionError):
+        return text
+    return text + "\n" + decoded
+
+
 def _ensure_layout(*directories: Path) -> None:
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
@@ -367,21 +388,13 @@ def _build_boundary_gate(
     reasons: list[str],
     review_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    if not review_items:
-        return {
-            "status": "clear",
-            "payload": None,
-            "reasons": [],
-        }
-
     index_path = staging_dir / "pending_review.json"
-    index = _read_pending_review_index(index_path)
-    reviews = _active_review_refs(root, staging_dir, index["reviews"])
-    latest = ""
+    # Every pending review is re-derived from the inbox each run, so the index is
+    # rebuilt from the currently gated items: a review whose file was removed or
+    # defused drops out instead of lingering as a phantom "operator action required".
+    reviews: list[str] = []
     for item in review_items:
         review_id = _review_id([item])
-        if _decision_record_exists(staging_dir, review_id):
-            continue
         review_payload_path = staging_dir / "reviews" / f"{review_id}.json"
         review_payload = {
             "schema": REVIEW_PAYLOAD_SCHEMA,
@@ -408,13 +421,9 @@ def _build_boundary_gate(
         }
         if not review_payload_path.exists():
             _write_json(review_payload_path, review_payload)
+        reviews.append(_rel(root, review_payload_path))
 
-        review_ref = _rel(root, review_payload_path)
-        reviews = [existing for existing in reviews if existing != review_ref]
-        reviews.append(review_ref)
-        latest = review_ref
-
-    if not latest:
+    if review_items or index_path.exists():
         _write_json(
             index_path,
             {
@@ -424,22 +433,12 @@ def _build_boundary_gate(
                 "reviews": reviews,
             },
         )
+    if not review_items:
         return {
             "status": "clear",
             "payload": None,
             "reasons": [],
         }
-
-    _write_json(
-        index_path,
-        {
-            "schema": PENDING_REVIEW_INDEX_SCHEMA,
-            "generated_at": generated_at,
-            "latest": latest,
-            "reviews": reviews,
-        },
-    )
-
     return {
         "status": "pending_review",
         "payload": _rel(root, index_path),
@@ -463,25 +462,6 @@ def _review_id(review_items: list[dict[str, Any]]) -> str:
     )
     digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
     return f"review-{digest}"
-
-
-def _active_review_refs(root: Path, staging_dir: Path, review_refs: list[str]) -> list[str]:
-    active: list[str] = []
-    for review_ref in review_refs:
-        try:
-            review_path = _resolve_under_root(root, review_ref)
-        except ValueError:
-            continue
-        if not review_path.exists():
-            continue
-        try:
-            payload = _read_json(review_path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        review_id = payload.get("review_id")
-        if review_id and not _decision_record_exists(staging_dir, str(review_id)):
-            active.append(review_ref)
-    return active
 
 
 def _run_id(generated_at: str) -> str:
@@ -538,6 +518,9 @@ def main() -> int:
         return 1
     except FileNotFoundError as exc:
         print(f"error: {exc.filename} not found. Is this a workspace? Try: looping-box init", file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as exc:  # corrupt SOP/state JSON, path outside the root, ...
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     print(f"delta: {delta['delta_path'] or 'none'}")

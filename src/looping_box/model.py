@@ -21,6 +21,9 @@ from typing import Any, Callable
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 _env_loaded_for: set[str] = set()
+# Only the model layer's own settings are read from `.env`: it must not be able to set
+# unrelated variables (e.g. LOOPING_BOX_REVIEW_KEY, LOOPING_BOX_ALLOW_NONINTERACTIVE).
+_ENV_PREFIXES = ("OPENROUTER_", "MODEL_")
 
 
 class ModelError(RuntimeError):
@@ -32,7 +35,7 @@ class ModelError(RuntimeError):
 
 
 def load_env(root: Path | str = ".") -> None:
-    """Load `<root>/.env` into os.environ once per root. Existing vars win."""
+    """Load OPENROUTER_*/MODEL_* from `<root>/.env` into os.environ once per root. Existing vars win."""
     key = str(Path(root).resolve())
     # ponytail: one-shot CLIs benefit from process-lifetime caching. If daemon
     # mode lands, reload semantics should change so .env edits can take effect.
@@ -47,7 +50,9 @@ def load_env(root: Path | str = ".") -> None:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         name, _, value = stripped.partition("=")
-        os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
+        name = name.strip().removeprefix("export ").strip()
+        if name.startswith(_ENV_PREFIXES):
+            os.environ.setdefault(name, value.strip().strip('"').strip("'"))
 
 
 def model_for(role: str) -> str | None:
@@ -88,6 +93,8 @@ def complete(
         raise RuntimeError("OPENROUTER_API_KEY is not set")
 
     base_url = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    if not base_url.startswith(("https://", "http://")):  # urllib would also open file:// and ftp://
+        raise ModelError("OPENROUTER_BASE_URL must start with https:// or http://")
     messages = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": prompt}
     ]
@@ -99,6 +106,8 @@ def complete(
     try:
         raw = _transport(f"{base_url}/chat/completions", headers, body, timeout)
         data = json.loads(raw)
+        if isinstance(data, dict) and data.get("error"):
+            raise ValueError(f"provider error: {str(data['error'])[:200]}")
         text = data["choices"][0]["message"]["content"]
         if not isinstance(text, str):  # refusals / tool calls come back as null content
             raise ValueError("response had no text content")

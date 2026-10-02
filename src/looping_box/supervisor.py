@@ -93,8 +93,8 @@ def status_summary(root: Path | str) -> str:
         if recovery.get("blocked_reason") in _RESOURCE_LIMIT_REASONS:
             next_step = (
                 "inspect the pending payload, then raise the matching limit in "
-                "config/super_loop.json or shrink the batch, then run "
-                "looping-box-supervisor --once"
+                "config/super_loop.json (work already ingested is kept and runs once you do), "
+                "then run looping-box-supervisor --once"
             )
         else:
             next_step = (
@@ -451,6 +451,9 @@ def _can_route(config: dict[str, Any], source: str, target: str) -> bool:
 
 
 def _changed_file_count(delta_paths: list[Path]) -> int:
+    """Changed files the workers would actually process. Items held for review are
+    excluded: they re-surface every run and are not worked, so a pile of held files
+    must not wedge the loop behind a limit that deciding them cannot clear."""
     count = 0
     for path in delta_paths:
         try:
@@ -458,7 +461,7 @@ def _changed_file_count(delta_paths: list[Path]) -> int:
         except (OSError, json.JSONDecodeError):
             continue
         if delta.get("schema") == DELTA_SCHEMA:
-            count += len(delta.get("changes", []))
+            count += sum(1 for change in delta.get("changes", []) if not change.get("review_reasons"))
     return count
 
 
@@ -600,21 +603,25 @@ def main() -> int:
     parser.add_argument("--status", action="store_true", help="Print supervisor status.")
     args = parser.parse_args()
 
-    if args.status:
-        print(status_summary(args.root))
-        return 0
-    if not args.once:
+    if not args.status and not args.once:
         parser.error("pass --once to run a supervisor pass, or --status to inspect state")
     try:
+        if args.status:
+            print(status_summary(args.root))
+            return 0
         result = run_supervisor(args.root)
     except RuntimeError as exc:  # another phase1/supervisor/review holds the lock
         print(f"busy: {exc}", file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as exc:  # corrupt world state/config JSON, unknown schema, ...
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"status: {result['status']}")
     print(f"plan: {', '.join(result['plan']) if result['plan'] else 'none'}")
     if result["recovery"]["operator_action_required"]:
         print(f"pending: {result['recovery']['pending_review_payload']}")
-    return 0
+    # Exit codes: 0 ok, 1 failed (retry after fixing) or busy, 2 blocked (operator action required).
+    return {"failed": 1, "blocked": 2}.get(result["status"], 0)
 
 
 if __name__ == "__main__":

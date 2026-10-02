@@ -15,6 +15,7 @@ from .supervisor import DEFAULT_CONFIG, load_world_state
 Finding = tuple[str, str, str]  # (level: ok|warn|fail, message, remedy)
 
 _STATE_WARN_HASHES = 5000
+_ARCHIVE_WARN_DELTAS = 1000
 
 
 def run_doctor(root: Path | str) -> list[Finding]:
@@ -59,8 +60,17 @@ def run_doctor(root: Path | str) -> list[Finding]:
     loop_config = root_path / "config" / "super_loop.json"
     try:
         if loop_config.exists():
-            stale_seconds = int(read_json(loop_config).get("stale_lock_seconds", stale_seconds))
+            loop = read_json(loop_config)
+            stale_seconds = int(loop.get("stale_lock_seconds", stale_seconds))
+            runtime = float(loop.get("max_worker_runtime_seconds", DEFAULT_CONFIG["max_worker_runtime_seconds"]))
             ok("super_loop.json readable")
+            # The lock is never refreshed during a run, so it must outlive the run.
+            if stale_seconds <= 2 * runtime:
+                warn(
+                    f"stale_lock_seconds ({stale_seconds}) is not comfortably above two worker runs "
+                    f"(max_worker_runtime_seconds={runtime:g}): a long run could have its lock taken",
+                    "raise stale_lock_seconds in config/super_loop.json",
+                )
     except (OSError, ValueError) as exc:
         fail(f"super_loop.json unreadable: {exc}", "fix or restore config/super_loop.json")
 
@@ -110,6 +120,13 @@ def run_doctor(root: Path | str) -> list[Finding]:
     bad = sorted((root_path / "cache" / "deltas").glob("*.bad*"))
     if bad:
         warn(f"{len(bad)} quarantined malformed delta(s)", "inspect cache/deltas/*.bad*, then archive or delete")
+
+    archived = sum(1 for _ in (root_path / "cache" / "deltas" / "archive").glob("*.json"))
+    if archived > _ARCHIVE_WARN_DELTAS:
+        warn(
+            f"{archived} archived deltas (one is written per run while any review is pending)",
+            "move old cache/deltas/archive/*.json elsewhere; the audit logs keep the history",
+        )
 
     state_file = root_path / "cache" / "state" / "phase1_state.json"
     try:
