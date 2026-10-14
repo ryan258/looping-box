@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Callable
 
 from . import doctor, phase1, report, review, scaffold, supervisor, worker
@@ -14,13 +15,14 @@ USAGE = """usage: looping-box <command> [args]
   init [DIR]            create a workspace with default config (never overwrites)
   run [--root R]        ingest the inbox, then one supervisor pass (what ./startday.sh does)
   status                supervisor status, including live pending reviews
-  review <sub>          list | show | approve | reject | key | audit
+  review [--root R] <sub>  list | show | approve | reject | key | audit
   worker <id>           run one worker pass (context_builder | execution_engine)
   doctor                read-only health check with remedies
   report [--since D]    audit logs and decisions as one markdown summary
   phase1, supervisor    low-level entry points (same flags as looping-box-phase1 / -supervisor)
 
-Set LOOPING_BOX_ROOT (or pass --root) to choose the workspace.
+Root: --root > LOOPING_BOX_ROOT > cwd. init [DIR] uses DIR (default cwd).
+run accepts only --root; custom paths belong to phase1.
 """
 
 _TOOLS: dict[str, Callable[[], int]] = {
@@ -53,11 +55,16 @@ def main(argv: list[str] | None = None) -> int:
     if command == "run":
         parser = argparse.ArgumentParser(prog="looping-box run")
         parser.add_argument("--root", default=default_root())
-        known, extra = parser.parse_known_args(rest)
-        code = _call("phase1", phase1.main, ["--root", known.root, *extra])
+        known = parser.parse_args(rest)
+        try:
+            root = str(Path(known.root).expanduser().resolve())
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"invalid_root: {known.root}: {exc}", file=sys.stderr)
+            return 1
+        code = _call("phase1", phase1.main, ["--root", root])
         if code:
             return code
-        return _call("supervisor", supervisor.main, ["--root", known.root, "--once"])
+        return _call("supervisor", supervisor.main, ["--root", root, "--once"])
     if command == "status":
         return _call("status", supervisor.main, ["--status", *rest])
     if command in _TOOLS:

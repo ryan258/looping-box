@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# One full pass: ingest the inbox (phase 1), then run the worker supervisor once.
-# Arguments are passed to phase 1 only. Set LOOPING_BOX_ROOT to use another workspace.
-# Exit: 0 ok, 1 failed/busy, 2 blocked (a review or limit needs the operator).
+# One complete pass; only --root is accepted. Custom paths belong to phase1.
+# Explicit --root wins over LOOPING_BOX_ROOT, then this script's directory.
+# Exit: 0 complete/idle, 1 failed/busy, 2 blocked/usage.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="${LOOPING_BOX_ROOT:-${ROOT_DIR}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="${LOOPING_BOX_ROOT:-${SCRIPT_DIR}}"
 
-run() {
-  local tool="$1"; shift
-  # Inside a checkout, run its own source; an installed copy could be stale.
-  if [ -d "${ROOT_DIR}/src/looping_box" ]; then
-    PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m "looping_box.${tool}" --root "${ROOT}" "$@"
-  else
-    "looping-box-${tool}" --root "${ROOT}" "$@"
-  fi
-}
-
-run phase1 "$@"
-run supervisor --once
+# Inside a checkout, prefer its source to a potentially stale installed copy.
+if [ -d "${SCRIPT_DIR}/src/looping_box" ]; then
+  export PYTHONPATH="${SCRIPT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+  exec python3 -m looping_box run --root "${WORKSPACE_ROOT}" "$@"
+fi
+exec looping-box run --root "${WORKSPACE_ROOT}" "$@"
