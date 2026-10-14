@@ -1,37 +1,63 @@
-# Threat Model
+# Threat model — 0.2.0
 
-What Looping Box defends, against what, and where it stops.
+Looping Box assumes one trusted operator account on a local macOS/Linux
+filesystem. Operator code, shell, and configuration are trusted; inbox text and
+model responses are untrusted data. The product creates local drafts and evidence.
+It does not execute source/model instructions, send the messages described in
+inputs, deploy, transfer money, or make Git commits. Optional enabled model roles
+send data to the configured HTTP(S) endpoint.
 
-## Trusted
-- The code, `config/` (SOP, action classes, limits), and the operator's shell.
-- The signing key (`$LOOPING_BOX_REVIEW_KEY` / `~/.config/looping-box/review.key`).
+## Boundaries and controls
 
-## Untrusted
-- **Inbox content** (may contain prompt injection or action language).
-- **Model output** (advisory text only; it is never executed, never gated-through).
-- Anything in `staging/`, `cache/`, `logs/` that is not signature- or chain-verified.
+- Runtime validators check config and persisted artifacts, supported versions,
+  required fields, limits, cross-field relationships, and relative paths. Invalid
+  evidence fails visibly; unknown configuration keys are rejected.
+- The selected root may resolve through a user-chosen symlink. Descendant links
+  used by internal operations are rejected; input links are skipped. This is
+  preexisting-path containment, not defense against hostile same-user races.
+- POSIX `flock` coordinates cooperating mutators. The persistent lock file's age
+  cannot authorize stealing it. Read-only inspection and worker dry run do not
+  create a lock or change workspace evidence.
+- Approval rechecks current source/policy and signs a record bound to the payload
+  hash. HMAC detects unsigned/edited records without the key. A terminal prompt
+  and explicit noninteractive override provide friction, not independent identity.
+- Audit hash chains detect many edits/reorderings. Append verifies the existing
+  chain and fails on corruption rather than repairing it silently.
+- Atomic replacement preserves individual complete files. Artifacts precede
+  successful-consumption markers; detected inconsistencies fail visibly.
 
-## Enforced
-- **Path containment**: configured paths and symlink targets must resolve under the root; symlinks are skipped.
-- **Gate before dedup**: a flagged file is gated by (path, content hash, reasons), so identical content at a new path is gated again.
-- **Per-item gating**: held items are never drafted or sent to a model; clean siblings proceed.
-- **Oversized inputs** (`max_file_bytes`) are never read; they are held.
-- **Signed decisions**: an approval/rejection counts only if its HMAC verifies. Forged, edited, or wrong-key records are ignored (gate stays closed) and reported as `decision_unverifiable` warnings. A key file readable by group/other is refused.
-- **Action classes**: `forbidden` cannot be approved; `blocked` needs `--allow-blocked`; unknown reasons default to `review_required`. At decision time the class is recomputed from current config and the review id (path + hash + reasons) is re-derived from the payload, so a hand-edited payload cannot downgrade its class or swap its reasons.
-- **Human-act friction**: approving needs a TTY and typed confirmation unless explicitly overridden (recorded).
-- **Serialized state changes**: one lock covers phase 1, supervisor, review, and bare worker passes; JSON writes are atomic and fsynced.
-- **Audit**: phase 1 runs, supervisor runs, and decisions are logged with a hash chain.
+## Accepted limitations
 
-## Known limits (accepted, stated plainly)
-- **The gate is a keyword tripwire.** Matching is normalized (Unicode, look-alikes, spaced letters, `_` as space, UTF-16 with BOM, JSON `\uXXXX` escapes) and whole-word, but it only knows its keyword list. Paraphrase, other languages, and other encodings or obfuscation (base64, rot13, HTML entities) can evade it. It is a seatbelt, not a guarantee. Generic words such as `token` or `release` are not listed because they would hold ordinary AI/dev prose.
-- **One key per user, not per workspace.** Decisions are bound to the review id (path + content hash + reasons), not to a workspace identity, so a record copied between workspaces with the same relative path and content would verify. Use a separate `LOOPING_BOX_REVIEW_KEY` per workspace if that matters.
-- **`.env` is limited, not trusted**: only `OPENROUTER_*`/`MODEL_*` are read from it, so it cannot set the signing key or the non-interactive override, but anyone who can edit it can redirect model traffic (`OPENROUTER_BASE_URL`, http(s) only).
-- **The project lock is advisory and time-based**: it is not refreshed during a run and two processes that both judge it stale can both proceed. Runs are short and bounded (`doctor` warns if `stale_lock_seconds` is too low), so this is accepted until the lock becomes kernel-backed (ROADMAP).
-- **Same-user attacker**: a process running as you can read the signing key, set the non-interactive override, or edit logs. The HMAC and TTY check stop accidents, hand-edits, and naive agents, not a determined local process.
-- **Audit logs are tamper-evident, not tamper-proof**: a full rewrite of a log (with a recomputed chain) is not detected; anchor the head hash elsewhere if that matters.
-- **Model verifier is advisory** and promptable by the excerpt it judges; the deterministic checks only prove payload integrity. Approval is a human decision; the verifier does not decide safety.
-- **Approval does not execute anything.** There are no executors; "approved" means "released into the local draft pipeline".
-- **Excerpts go to OpenRouter** for any role with a model configured. `context_builder`/`execution_engine` exclude gated items; the `verifier` role receives the gated item's excerpt at approval time. Secrets are not redacted.
+1. **Keyword misses and false positives.** Unlisted language, encodings,
+   obfuscation, and paraphrases can evade the gate. It is not a semantic safety
+   certification. Empty gate configuration is allowed with a doctor warning.
+2. **User-scoped keys.** Keys may be reused across workspaces; matching records
+   and payloads can verify under the same key elsewhere. Attribution is not
+   authenticated identity. A process running as the operator can bypass controls.
+3. **Unanchored audit history.** Complete chain recomputation, valid-suffix
+   removal, or deletion of all logs cannot be detected without an external anchor.
+4. **Unbounded overall ingestion and storage.** Oversized files are streamed for
+   hashing; they still cause disk reads. Global scan count/I/O and disk growth
+   are not capped. Per-worker limits do not establish global bounds.
+5. **Post-return runtime checks.** A slow call is not forcibly interrupted at
+   the configured worker budget. Requests/charges already made cannot be undone.
+   There is no hard subprocess deadline or total memory cap.
+6. **Excerpt-only drafts.** Default excerpts are at most 500 characters. Offline
+   drafting copies excerpts; full-content understanding and draft quality are
+   not guaranteed. Oversized approved inputs supply empty excerpts.
+7. **Operator-managed retention.** State, history, archives, logs, and old reviews
+   accumulate. There is no automatic compaction or encrypted storage.
+8. **Partial crash recovery.** Individual writes are atomic; multi-file updates
+   are not a database transaction. Arbitrary crashes/state rollback can cause
+   replay or inconsistent evidence. General exactly-once behavior is not promised.
+9. **Limited operating environment.** Hostile same-user races, Windows, network
+   filesystems, multiple machines, and distributed workers are unsupported.
+10. **Model uncertainty and disclosure.** Prompts are not complete injection
+    defenses. Advisory verifier passes do not establish safety or factual
+    accuracy. Enabled roles send unredacted excerpts/context/review content to
+    the chosen endpoint; there is no automatic secret redaction.
 
-## Reporting
-Open an issue or contact the maintainer. Do not post secrets or live keys.
+Keep keys and `.env` private. Review content before enabling a model role, and
+preserve evidence when diagnostics fail. No benchmark, SLA, regulatory
+conformance, automated quality threshold, or accessibility certification is
+claimed. See [RECOVERY.md](RECOVERY.md) for bounded operator remedies.

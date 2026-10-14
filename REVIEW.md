@@ -1,53 +1,76 @@
-# Review — open items
+# Review status — 0.2.0 local candidate
 
-Living list of what is still open. Resolved history: `CHANGELOG.md` and
-`docs/history/`. Feature ideas: `ROADMAP.md`. Trust model: `docs/THREAT-MODEL.md`.
+This document separates implemented behavior from remaining acceptance work.
+The controlling build contract is the existing sibling `looping-box-spec/spec.md`
+and its bounded task list. The broader source review is retained in
+[PROJECT-REVIEW-2026-10-13.md](docs/PROJECT-REVIEW-2026-10-13.md) as historical
+findings and proposals; it is not evidence that current acceptance is complete.
 
-Last full review: 2026-10-02 (two passes; all fixes verified with regression tests
-and bundled for 0.1.0).
+## Current implementation scope
 
-## Open by design
+T01–T09 cover recursive runtime validation, contained paths, persistent kernel
+locking and atomic replacement, consistent snapshots/removals, signed review
+integrity, read-only worker planning, freshness/carry-over/model invalidation,
+supervisor recovery, and structured diagnostics/audit/reporting. T10 aligns
+commands, package data/version, scaffold validation, and operator documentation.
+The new command acceptance fixtures exercise isolated subprocesses and wrapper
+behavior; source presence is not proof of runtime success.
 
-- **Keyword gate is a tripwire.** Matching is normalized and whole-word, but it only
-  knows its list (generic words like `token`/`release` are deliberately absent). Next
-  step if review fatigue or misses show up: a model classifier that can only *raise*
-  severity (ROADMAP).
-- **Same-user attacker** can read the signing key, set the non-interactive override,
-  or rewrite logs (THREAT-MODEL).
-- **Model verifier is advisory**; deterministic verifier checks prove payload integrity only.
-- **Unbounded phase 1 state.** `processed_files` / `processed_hashes` grow forever (runs are capped); `doctor` warns.
-- **Per-run growth while a review is pending.** Each run writes a delta (archived) and audit
-  lines while any item is held. Audit logs are append-only by design; `doctor` warns on a large archive.
-- **Project lock is advisory and time-based** (not refreshed, no pid check; two processes that
-  both judge it stale can both proceed). Runs are short; `doctor` checks the config. Fix is a
-  kernel-backed lock (ROADMAP).
-- **Worker timeout is measured after the fact**, not enforced. Each worker makes at most one
-  model call and its transport timeout equals the limit, so the blocked-and-retried-with-spend
-  case needs a response that lands just over the limit. A hard deadline needs threads or a subprocess.
-- **Malformed SOP fails loudly** by design (now as an `error:` line, exit 1).
-- **Drafts only see 500-char excerpts** (`max_excerpt_chars`); offline, a draft is that excerpt.
-  Full-content processing is on the ROADMAP.
-- **Carry-over assumes `execution_engine` runs after `context_builder`** (default routing). With it
-  unrouted, undrafted items accumulate until `max_payload_bytes` blocks.
+Previous review items about time-based lock stealing, split hash/text reads,
+missing schema families, and a test-only validator are superseded by those
+changes. They should not remain on a future-feature list. Resource budget checks
+still happen after worker return; that is an accepted limit, not a hard deadline.
 
-## Open, small
+## Remaining acceptance work
 
-- Phase 1 hashes then reads a file; a change in between is only caught on the next run.
-- A wider SOP keyword list re-gates previously processed files (the gate runs before dedup).
-  Fail-closed, but note it when upgrading the SOP.
-- No tests yet for the interactive approve prompt, `startday.sh`, or the demo scripts.
-- `worker_output.schema.json` lists statuses no worker produces (`ready`, `running`, `pending_review`).
-- No schemas yet for `context_package`, `execution_draft`, audit events, or the config files.
-- `config/workers/` is an empty reserved directory (kept for the pluggable-workers idea).
-- `schema.py` (test-only validator) and `classify_action` (test-only) live in the package.
-- Modules import `_util` helpers under underscore aliases (`read_json as _read_json`); cosmetic.
-- Python 3.9 is declared and run in CI only; develop on a current Python.
-- `.env.example` model ids are examples; confirm them on openrouter.ai before relying on them.
+T10's focused CLI/scaffold results were supplied as successful. T11 added the
+A01–A31 map, installed-wheel helper, isolated fixtures, and required CI matrix.
+The original detailed aggregate transcript reported **194 tests, 4 failures,
+6 errors, 1 expected installed-wheel skip**; that failed result remains recorded.
 
-## Owner decisions (not code)
+T12 has recorded that failed result in [acceptance-results.md](acceptance-results.md).
+A bounded reopening repairs worker config validation before lock-diagnostic
+mutation and stale validation/freshness fixtures. Subsequent operator results
+passed all three focused repair suites: validation 22, freshness 19, and worker
+intake 15 tests. The repaired-tree aggregate then passed: **194 tests in 34.153s,
+OK (skipped=1), exit 0**, on Python 3.14.7 and
+`macOS-27.0.1-arm64-arm-64bit-Mach-O`. The skip is the installed-wheel scenario.
+The subsequent full suite failed: **301 tests in 39.526s, 4 failures, 1 skip,
+exit 1**. Repository-wide Ruff passed with exit 0. The failures are legacy
+fixture/expectation mismatches with required SOP initialization, review error
+semantics, and current-source freshness. A bounded T11 repair changes only
+`tests/test_regressions.py` and `tests/test_worker.py`, preserving the rejection,
+busy-lock, and deterministic-draft assertions and adding explicit missing-source
+preservation checks. Both focused operator checks passed: **19 regression
+tests in 0.289s and 8 worker tests in 0.143s, each exit 0**. The full offline
+suite was then executed on Python 3.14.7 (`macOS-27.0.1-arm64-arm-64bit-Mach-O`):
+**301 tests in 39.191s, OK (skipped=1), exit 0**. An isolated virtual environment
+outside the checkout verified the built wheel with `LOOPING_BOX_TEST_CLI`:
+**2 tests in 2.007s, OK, exit 0**. Repository-wide Ruff checks passed with exit 0.
 
-- **LICENSE** and the `license` field in `pyproject.toml` (blocks PyPI).
-- Whether to keep the GitNexus-generated `AGENTS.md` and `.claude/skills/gitnexus-*`
-  (their counts drift from `CLAUDE.md`, and the Cyborg manual says GitNexus is not active).
-- Whether `docs/sales-demos.md` earns its place before there is a prospect.
-- A 0.1.0 tag and what it contains.
+GitHub Actions platform-matrix runs (Ubuntu 3.9/3.12/3.14, macOS 3.12) and the
+manual real-terminal approval procedure remain operator/CI verifications.
+Exact Python/OS versions and wheel identity accompany the local results. No live
+provider call or draft-quality certification is required or implied by local acceptance.
+
+No staging, commit, tag, publication, or license choice follows automatically
+from these tasks. Documentation describes intended current behavior and explicit
+limitations; it does not certify the release.
+
+## Accepted limitations
+
+The keyword gate can miss language or over-hold innocent text. Keys are user-scoped
+across workspaces, attribution is not identity, and same-user attackers are outside
+the model. Hash chains lack an external anchor. Oversized files still require
+streamed reads; ingestion count/I/O and disk retention are not globally bounded.
+Only excerpts reach drafts. Runtime checks are post-return and model requests
+cannot be rolled back. No general multi-file crash transaction, Windows,
+network-filesystem, or distributed support is claimed. See the complete
+[threat model](docs/THREAT-MODEL.md).
+
+## Owner decisions and deferred proposals
+
+License and public distribution are optional owner decisions. The broader idea
+catalog, sales-oriented material, and old demos are exploratory/historical, not
+part of 0.2.0 acceptance or a commercial requirement. Future enhancements are
+listed in [ROADMAP.md](ROADMAP.md); none expand this bounded implementation task.

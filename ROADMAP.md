@@ -1,39 +1,36 @@
-# Looping Box Roadmap
+# Looping Box roadmap
 
-The local file-system loop is complete and hardened (see `CHANGELOG.md`). This file is
-the single forward-looking list. It stays local-first: no daemon, no network state, and
-no automatic commits, pushes, deploys, or messages unless an item below says otherwise
-and ships behind explicit human approval.
+The active deliverable is a private, local, installable 0.2.0 candidate: one-pass
+inbox ingestion, review, traceable drafts, and recoverable operational evidence.
+[REVIEW.md](REVIEW.md) tracks implementation versus acceptance. There is no claim
+that the release is complete, hardened against every threat, or published.
 
-Effort: **S** hours, **M** a day or two, **L** a week+.
+## Current contract status (0.2.0 local candidate)
 
-## Next release: "trustworthy gate" (implemented, tested, and bundled)
-Per-item gating, approval release, signed attributed decisions, hash-chained audit
-(+ `looping-box-review audit`), normalized whole-word matcher, shared lock, size cap,
-retry-after-outage, live status, unverifiable-decision warnings, key-permission check,
-repeatable demos, CI, then the second review pass (CHANGELOG: carry-over after outage,
-phantom-review fix, gate gaps, approval hardening, exit codes). All tests pass locally;
-decide the LICENSE, then cut 0.1.0 before starting anything below.
+1. T10 command/scaffold changes accepted against current files.
+2. T11 acceptance coverage completed: full 301-test offline suite passing (`OK, skipped=1`), isolated installed-wheel acceptance passing (`2 tests, OK`), and Ruff lint clean.
+3. T12 evidence and operator handoff recorded in [acceptance-results.md](acceptance-results.md) and [REVIEW.md](REVIEW.md); unresolved platform matrix/CI runs and owner publication decisions remain unverified.
 
-## Adoption (after the release above)
-- `[x]` `looping-box` umbrella CLI (`run`, `status`, `review`, `worker`, `doctor`, `init`, `report`). **S**
-- `[x]` `looping-box doctor`: config drift, locks, recovery state, pending/unverifiable reviews, quarantined deltas, key and `.env` permissions, audit chain. Model reachability (network) is deliberately not checked. **S**
-- `[x]` `looping-box report [--since]`: audit-log + decisions as one markdown summary. **S**
-- `[x]` `looping-box init` scaffold (defaults bundled as package data). **S**
-- `[ ]` PyPI publication: blocked on a LICENSE decision (and a `license` field in pyproject). **S**
-- `[ ]` Model layer: retries/backoff + fallback chain, token/cost accounting, response cache, prompts in `config/prompts/`. **M**
-- `[ ]` Secret redaction before any outbound model prompt. **M**
-- `[ ]` Full-content processing with chunking, more input types (csv, html, code; optional pdf extra). **M**
-- `[ ]` State compaction for `processed_*`. **S**
-- `[ ]` Interactive review loop (`looping-box-review interactive`) and notification hook on gate trip. **M**
+Kernel locking, runtime schemas, source snapshot consistency, contained access,
+review payload binding, freshness/removals, and read-only diagnostics belong to
+this candidate. They are no longer future-feature proposals. Hard interruption
+of a slow worker is still deferred; measured runtime bounds do not stop a call.
 
-## Platform
-- `[ ]` Kernel-backed project lock (`flock`/`msvcrt`) with no time-based steal; enforced worker deadline (thread/subprocess). **M**
-- `[ ]` Pluggable workers (registry in `config/workers/`, entry points). **L**
-- `[ ]` Watch mode (foreground polling, stops at any block; needs `load_env` reload). **L**
-- `[ ]` Optional model classifier that can only raise severity; optional verifier ensemble (advisory). **M**
+## Later proposals, each needing its own scope
 
-## Only after the above holds
-- `[ ]` MCP server: read-only tools plus "propose"/`ingest_text`. **Do not expose approve** — an MCP permission prompt is not an independent human gate. **L**
-- `[ ]` Approval-released executors (`git_commit`, `file_move` first): one action per approved review, run exactly once, logged. **L**
-- `[ ]` Multi-machine / network state stores. **L**
+| Opportunity | Proposed direction | Constraint to preserve |
+|---|---|---|
+| Less review effort | Accessible review queue with short, voice-friendly commands | Explicit decision, nonblank note, provenance, and terminal semantics |
+| Less outbound disclosure | Preview/redact model prompts before opting into a role | No silent claim that redaction finds every secret |
+| Larger sources | Chunking and additional input formats | Bound memory/I/O and retain source provenance |
+| Predictable provider use | Cost accounting, response cache, deliberate retry/backoff | No automatic spend or concealed retries |
+| Less disk growth | Operator-controlled retention and compaction | Preserve recovery, decision, and audit evidence |
+| Better gate evaluation | Labeled local examples with measured misses/false positives | Keyword/model judgments remain limited evidence |
+| Stronger isolation | Separate process deadlines and stronger transaction recovery | Explicit platform and crash guarantees |
+| Workspace isolation | Optional workspace-bound signing keys/records | Intentional migration, never silent invalidation |
+
+Watch mode, pluggable workers, read-only integrations, and distributed storage
+are outside 0.2.0. Any executor would be a separate product/security decision:
+current approval permits drafting only. Public distribution and licensing need
+owner authorization and do not block personal local use. No commercial roadmap,
+SLA, or accessibility certification is assumed.

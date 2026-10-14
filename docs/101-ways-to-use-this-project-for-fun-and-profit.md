@@ -22,7 +22,7 @@ Tags: **[today]** works as shipped. **[model]** needs `OPENROUTER_API_KEY` and a
 `MODEL_<ROLE>` (excerpts leave your machine). **[roadmap]** needs an item from
 [ROADMAP.md](../ROADMAP.md). **[you do]** the tool holds or records; a human acts.
 
-Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
+Adding a gate keyword means editing both `config/sops/phase1_ingestion.md` and
 `config/action_classes.json`; `looping-box doctor` warns if they disagree.
 
 ---
@@ -34,8 +34,8 @@ Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
 2. **The follow-up checklist.** `looping-box review list` is a to-do list of everything
    that sounded like an action you owe. **[today] [you do]**
 3. **Morning delta.** Run `looping-box run` from cron; exit code `2` means something is waiting for you. **[today]**
-4. **Meeting-notes sink.** Transcripts in, action items routed to `task_backlog`, "send the deck" held. **[today]**
-5. **Email-export triage.** Save emails as `.txt`; ones asking you to pay, send, or sign get held. **[today]**
+4. **Meeting-notes sink.** Transcripts in; files matching backlog keywords are routed to `task_backlog`, and action phrases like "send the deck" hold the file. **[today]**
+5. **Email-export triage.** Save emails as `.txt`; ones asking you to `pay` or `send` get held (add `sign` to your SOP if desired). **[today]**
 6. **Bills inbox.** `invoice` and `pay` are gate words, so bills pile up in the review list instead of in your head. **[today] [you do]**
 7. **Journal with a smoke alarm.** Entries mentioning `password`, `secret`, or `api key` are held
    in the `blocked` class, so you notice when you pasted a credential into your notes. **[today]**
@@ -57,7 +57,7 @@ Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
 20. **Circuit breaker.** `max_files_per_cycle` and `max_payload_bytes` cap how much a runaway producer can push through one cycle. **[today]**
 21. **A "forbidden" list.** Move `deploy` to the `forbidden` class during a freeze: requests can only be rejected, never approved. **[today]**
 22. **Quarantine for scraped content.** Pages saved as `.md`; credential-ish text is held before any model sees it. **[today]**
-23. **Cheap filter before an expensive model.** Held and oversized items never reach OpenRouter; only clean excerpts do. **[model]**
+23. **Cheap filter before an expensive model.** Held items are kept out of drafting prompts (and oversized files are streamed for identity only); clean excerpts reach OpenRouter. **[model]**
 24. **Role-split models.** Cheap model for `context_builder`, strong one for `execution_engine`, a third as `verifier`. **[model]**
 25. **A skeptic verifier.** Judge approvals with a different model family; remember it is advisory and promptable. **[model]**
 26. **Morning review for scheduled LLM jobs.** Cron writes outputs to `inbox/`; you read the held ones over coffee. **[today] [you do]**
@@ -75,7 +75,7 @@ Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
 35. **Hygiene check.** `looping-box doctor` flags loose key permissions, unverifiable decisions, stale locks, config drift. **[today]**
 36. **Justification trail.** `--note` is mandatory for both decisions, so "why" is always on file. **[today]**
 37. **Four-eyes light.** Two people, two `LOOPING_BOX_APPROVER` names, one convention: the second reviewer re-reads the first's note. **[you do]**
-38. **Quarterly "what did we hold" report.** Today: `jq` over `review.jsonl`. Later: `looping-box report`. **[today] [roadmap]**
+38. **Quarterly "what did we hold" report.** `looping-box report` generates a markdown summary of audit chains and review decisions. **[today]**
 
 ## D. Writing and research (39–50)
 
@@ -85,11 +85,11 @@ Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
 42. **Brand-voice guardrail.** Hold drafts containing words your brand never says. **[today]**
 43. **Newsletter pipeline.** `publish` and `send` are gate words; you are the send button. **[today] [you do]**
 44. **Social-post approval queue.** Posts as `.txt`; `post to` and `tweet` hold them; you post by hand. **[today] [you do]**
-45. **Prompt-library staging.** New prompts sit in review until someone has tested them. **[today]**
+45. **Prompt-library staging.** Prompts matching configured gate words sit in review until an operator approves drafting. **[today]**
 46. **Release-notes collector.** Merge-request blurbs in, one draft of notes out. **[today]**
-47. **Interview-transcript sorter.** Routes tag quotes by topic. **[today]**
-48. **Zettelkasten sorter.** Notes arrive, routes file them, the delta shows what changed. **[today]**
-49. **Counter-argument pass.** A `verifier` prompt that argues against each draft before you approve. **[model]**
+47. **Interview-transcript sorter.** Routes tag whole transcript files by keyword topic. **[today]**
+48. **Zettelkasten sorter.** Notes arrive, routes label them in deltas, and the delta shows what changed. **[today]**
+49. **Counter-argument pass.** An advisory `verifier` prompt that evaluates held requests at human-approval time. **[model]**
 50. **Long-document processing.** Today only 500-char excerpts; chunking is on the roadmap. **[roadmap]**
 
 ## E. Dev and ops (51–64)
@@ -154,9 +154,9 @@ Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
 
 ## I. Make it better (99–101)
 
-99. **Build `looping-box report`.** The audit log plus decisions as one markdown summary. **[roadmap]**
-100. **Build the lock properly.** A kernel-backed project lock and an enforced worker deadline. **[roadmap]**
-101. **Finish it.** Run the test suite, choose a LICENSE, tag 0.1.0, and stop adding features until someone uses it. **[you do]**
+99. **Activity reporting.** `looping-box report` produces an audit and decision summary. **[today]**
+100. **Robust locking.** A kernel-backed POSIX `flock` project lock is now built; hard subprocess deadlines remain on the roadmap. **[today] [roadmap]**
+101. **Finish it.** Run the test suite and verify the local candidate; publication and license choices remain owner decisions. **[today] [you do]**
 
 ---
 

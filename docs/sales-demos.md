@@ -15,13 +15,15 @@ Most automation tools have one scary flaw: once you turn them loose, they can
 send an email, push a change, or delete something **on their own**. One bad
 input and there's no undo.
 
-Looping Box is built the opposite way. It happily reads and organizes your
-files, but the moment it sees anything that looks like a real-world action —
-*deploy, send, publish, email, delete, anything touching credentials* — it
-**stops and waits for a person**. Nothing leaves the building without approval.
+Looping Box is built the opposite way. It prepares local drafts and notes from your
+files, but the moment it sees recognized outward-action language —
+*deploy, send, publish, email, delete, or credentials* — it
+**holds that item for a person to review**. It has no executors to send, push, or
+delete anything in the outside world, and held items are kept out of drafts. If you
+opt into an AI model, only clean excerpts are sent unless you specifically approve a held item.
 
-That's the whole sell: **automation you can trust because a human stays in
-control of the dangerous part.**
+That's the whole sell: **safe local automation where risky action language is caught,
+held, and kept under human control.**
 
 ## Before you start
 
@@ -167,8 +169,11 @@ draft pipeline once; it still doesn't send or deploy anything."
   local machine with no internet and no outside servers. If you *choose* to turn
   on AI assistance for a role (via the OpenRouter setting), that role sends its
   prompt — which can include excerpts of the files it's working on — to
-  OpenRouter to generate a response. Nothing else leaves the machine, and the
-  human-approval gate is unchanged either way.
+  OpenRouter to generate a response. Held items are kept out of drafting prompts;
+  only when a human approves a held item does the optional verifier receive its
+  excerpt, and the approved item then enters local drafting. Oversized inputs are
+  streamed for hashing but never decoded into full text or sent as content.
+  Nothing else leaves the machine, and the human-approval gate is unchanged either way.
 
 - **"What if I ignore a flagged item?"**
   It keeps re-flagging it on every run until a person approves, rejects, or
@@ -195,11 +200,22 @@ If a prospect needs those, log it as a request — don't promise it on the call.
 
 ## Reset between demos
 
-The `demo-*.sh` scripts reset themselves. After the step-by-step versions, clear the
-real workspace:
+The `demo-*.sh` scripts run in throwaway workspaces automatically. For step-by-step
+manual walkthroughs, prefer using a disposable test workspace rather than mutating
+your real files:
+
+```sh
+demo_root="$(mktemp -d)"
+looping-box init "$demo_root"
+# Run your walkthrough using --root "$demo_root"
+# When finished, remove the temporary directory:
+rm -rf "$demo_root"
+```
+
+If you ran the steps in your current development workspace, remove only the demo input files:
 
 ```sh
 rm -f inbox/notes.txt inbox/release.txt
-find cache logs staging -type f ! -name .gitkeep -delete
-rm -f .world_state.json .looping_box.lock
 ```
+
+Never delete `.looping_box.lock` or wipe runtime state by hand; the lock is persistent and kernel-managed.

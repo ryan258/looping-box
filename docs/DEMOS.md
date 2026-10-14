@@ -1,326 +1,108 @@
-# Looping Box Demos
+# Local walkthroughs — 0.2.0
 
-These demos are designed to be run from the repository root. They exercise the
-Phase 1 ingestion loop through the file system only. `./startday.sh` also runs one
-supervisor pass, which archives observed deltas, so the helper below looks in
-`cache/deltas/archive/` too. For hands-off, repeatable runs use `./demo-1.sh` ..
-`./demo-3.sh`, which work in a throwaway workspace.
+Use a new temporary workspace for each experiment. These steps are examples,
+not acceptance results. They use an installed `looping-box`; install the checkout
+as described in [README](../README.md). Existing numbered and `demos/` shell
+scripts are optional historical examples, not required 0.2.0 acceptance gates.
+They have not been comprehensively revised by the bounded command/docs task.
 
-## Use-case demos
+## A clean offline pass
 
-One runnable script per use-case section of
-[101-ways-to-use-this-project-for-fun-and-profit.md](101-ways-to-use-this-project-for-fun-and-profit.md#the-winners-runnable).
-Each runs in its own throwaway workspace and is repeatable; `./demos/run-all.sh` runs
-all nine.
-
-| Demo | Script | Shows |
-|---|---|---|
-| A. What do I owe people? | [a-owed-list.sh](../demos/a-owed-list.sh) | Meeting notes sorted into drafted and held follow-ups |
-| B. Agent pre-flight | [b-agent-preflight.sh](../demos/b-agent-preflight.sh) | Risky agent plans held; `blocked` class refuses a casual approve |
-| C. Tamper evidence | [c-tamper-evidence.sh](../demos/c-tamper-evidence.sh) | Edited log or record is detected |
-| D. Overclaim tripwire | [d-overclaim-tripwire.sh](../demos/d-overclaim-tripwire.sh) | Custom gate words; editing the text clears the hold |
-| E. CI gate | [e-ci-gate.sh](../demos/e-ci-gate.sh) | Exit code `2` as a human sign-off step |
-| F. Evasion lab | [f-evasion-lab.sh](../demos/f-evasion-lab.sh) | What the gate catches and what it misses |
-| G. Gate tuning | [g-gate-tuning.sh](../demos/g-gate-tuning.sh) | Measured before/after on a client's incidents |
-| H. Dungeon Master's table | [h-dm-table.sh](../demos/h-dm-table.sh) | Forbidden class, approvals with notes, log as record |
-| I. Report | [i-report.sh](../demos/i-report.sh) | `looping-box report` summary |
-
-The numbered demos below are the older step-by-step walkthroughs that run in this repo's
-own workspace.
-
-Runtime outputs (state, deltas, worker output, verifier results, staging records,
-logs) and everything in `inbox/` except `.gitkeep` are ignored by git.
-
-Use this helper after any run to inspect the newest delta:
+Start an interactive Bash session first. Keep it open for all the steps below;
+`exit` at the end restores your previous environment.
 
 ```sh
-latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-python3 -m json.tool "$latest"
+bash --noprofile --norc
 ```
 
-To reset all demo runtime state:
+In that session, create the disposable workspace. This disables model roles and
+isolates the review key from your real key directory:
 
 ```sh
-find inbox -maxdepth 1 -type f -name 'demo-*' -delete
-find cache logs staging -type f ! -name .gitkeep -delete
-rm -f .world_state.json .looping_box.lock
+demo_root="$(mktemp -d)"
+export LOOPING_BOX_ROOT="$demo_root"
+export XDG_CONFIG_HOME="$demo_root/private-config"
+export LOOPING_BOX_REVIEW_KEY=demo-key-not-a-secret
+export LOOPING_BOX_APPROVER=demo-operator
+export OPENROUTER_API_KEY= MODEL_CONTEXT_BUILDER= MODEL_EXECUTION_ENGINE= MODEL_VERIFIER=
+export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+looping-box init "$demo_root"
+printf '%s' 'Project docs: summarize the backlog.' > "$demo_root/inbox/notes.txt"
+looping-box run
+cat "$demo_root/cache/workers/execution_engine/draft.md"
+looping-box status
+looping-box report
+printf '\nPreserved demo workspace: %s\n' "$demo_root"
 ```
 
-## Demo 1: Run an Empty Inbox Pass
-
-Goal: Confirm the loop can run with no inputs and stops cleanly.
-
-Steps:
-
-1. Reset runtime state:
-
-   ```sh
-   find inbox -maxdepth 1 -type f -name 'demo-*' -delete
-   find cache logs staging -type f ! -name .gitkeep -delete
-   rm -f .world_state.json .looping_box.lock
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the terminal prints `delta: none` and
-`0 changed, 0 skipped, review=clear`. An empty scan writes no delta file, so skip
-step 3 for this demo.
-
-## Demo 2: Ingest a Documentation Note
-
-Goal: Show keyword routing into the `documentation` route.
-
-Steps:
-
-1. Create a documentation input:
-
-   ```sh
-   printf '# Demo Docs\n\nReadme update notes for the local ingestion loop.\n' > inbox/demo-docs.md
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the delta contains `inbox/demo-docs.md` with
-`"matched_routes": ["documentation"]`.
-
-## Demo 3: Ingest a Task Backlog Item
-
-Goal: Show backlog language being classified as work to process later.
-
-Steps:
-
-1. Create a backlog input:
-
-   ```sh
-   printf 'TODO: add a task for validating stale cache recovery.\n' > inbox/demo-backlog.txt
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the delta contains `inbox/demo-backlog.txt` with
-`"matched_routes": ["task_backlog"]`.
-
-## Demo 4: Ingest a Context Package
-
-Goal: Show context-oriented notes being routed without loading the whole repo
-into the worker.
-
-Steps:
-
-1. Create a context input:
-
-   ```sh
-   printf 'Context brief: summarize the current requirements and notes.\n' > inbox/demo-context.md
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the delta contains `inbox/demo-context.md` with
-`"matched_routes": ["context_package"]`.
-
-## Demo 5: Trigger Multiple Routes From One File
-
-Goal: Show that one input can fan out to more than one downstream concern.
-
-Steps:
-
-1. Create a mixed input:
-
-   ```sh
-   printf 'Readme docs TODO: capture the next step in the project backlog.\n' > inbox/demo-multiroute.md
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the delta contains `inbox/demo-multiroute.md` with both
-`documentation` and `task_backlog` in `matched_routes`.
-
-## Demo 6: Ingest a JSON Input
-
-Goal: Confirm `.json` files are valid ingestion inputs under the SOP.
-
-Steps:
-
-1. Create a JSON input:
-
-   ```sh
-   printf '{"kind":"notes","body":"Context summary for requirements review."}\n' > inbox/demo-input.json
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the delta contains `inbox/demo-input.json`, its SHA-256 hash,
-and at least the `context_package` route.
-
-## Demo 7: Prove Identical Content Is Skipped
-
-Goal: Demonstrate local caching and sequential idempotence.
-
-Steps:
-
-1. Reset runtime state for a clean cache demonstration:
-
-   ```sh
-   find inbox -maxdepth 1 -type f -name 'demo-*' -delete
-   find cache logs staging -type f ! -name .gitkeep -delete
-   rm -f .world_state.json .looping_box.lock
-   ```
-
-2. Create one input:
-
-   ```sh
-   printf 'Backlog task: verify repeated runs skip identical data.\n' > inbox/demo-cache.txt
-   ```
-
-3. Run the loop twice:
-
-   ```sh
-   ./startday.sh
-   ./startday.sh
-   ```
-
-4. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the second delta summary shows `"changed": 0` and
-`"skipped": 1`, with the skipped item reason set to `already_processed`.
-
-## Demo 8: Reprocess a Changed File
-
-Goal: Show that the cache is content-based, so changed content produces a new
-delta.
-
-Steps:
-
-1. Start from the file created in Demo 7, then append new content:
-
-   ```sh
-   printf ' Documentation decision: record the cache behavior.\n' >> inbox/demo-cache.txt
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-3. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the delta shows `inbox/demo-cache.txt` under `changes`, not
-`skipped`, and includes the updated route matches.
-
-## Demo 9: Trip the Boundary Gate
-
-Goal: Show that outward-action language is staged for human review instead of
-being executed.
-
-Steps:
-
-1. Create an input that asks for high-leverage action:
-
-   ```sh
-   printf 'Please deploy this production change and send the email announcement.\n' > inbox/demo-boundary.txt
-   ```
-
-2. Run the loop:
-
-   ```sh
-   ./startday.sh
-   ```
-
-   (Note: `./startday.sh` exits with code `2` to signal that operator action is required.)
-
-3. Inspect the pending review index and latest payload:
-
-   ```sh
-   python3 -m json.tool staging/pending_review.json
-   latest_review="$(python3 -c 'import json; print(json.load(open("staging/pending_review.json"))["latest"])')"
-   python3 -m json.tool "$latest_review"
-   ```
-
-4. Inspect the newest delta:
-
-   ```sh
-   latest="$(ls -t cache/deltas/*.json cache/deltas/archive/*.json 2>/dev/null | head -1)"
-   python3 -m json.tool "$latest"
-   ```
-
-Expected result: the terminal prints `review=pending_review` (and exits `2` for blocked), the delta
-boundary gate status is `pending_review`, `staging/pending_review.json` points
-to a review payload under `staging/reviews/`, and that payload lists reasons
-such as `deploy`, `production`, `send`, and `email`.
+Expected: run exits 0, the offline draft contains the source excerpt and path,
+and status is clear. A repeated unchanged pass emits skipped ingestion evidence
+without repeating draft content. Each scan with supported input creates a delta;
+the supervisor can archive validated consumed deltas. A never-populated empty
+inbox writes ingestion state but no delta. No model output quality is implied.
+
+The demo key is intentionally public fixture text; never use it for real reviews.
+The temporary workspace is preserved for inspection. There is no broad reset
+command and no lock-file deletion.
+
+## A held item, with a real human decision
+
+Continue in the same interactive demo session, where `demo_root` and the
+fixture environment are still set:
+
+```sh
+printf '%s' 'Deploy the site.' > "$demo_root/inbox/action.txt"
+looping-box phase1                 # exits 0 even though an item is held
+looping-box run                    # exits 2: blocked by review
+looping-box review list            # exits 0: successful inspection
+```
+
+Use the returned ID in `review show ID`. In a terminal, run
+`looping-box review approve ID --note 'Reviewed for local drafting'`, inspect the
+prompt, and type `approve` only if intended. Alternatively use
+`looping-box review reject ID --note 'Exclude from drafting'`. Then rerun `run`.
+Approval permits a local draft of the request; no deployment occurs.
+
+A source containing `Save the api key.` is blocked-class: approval additionally
+requires `--allow-blocked`. An edited source needs ingestion and fresh review;
+editing a staged payload is not a way to lower severity. When scripting, handle
+expected exit 2 explicitly instead of treating every nonzero exit as a crash.
+
+## Remove or defuse a source deliberately
+
+In the disposable workspace only, edit the held source to harmless content or
+remove that input file, then run `phase1`. Pending references reconcile with the
+current inputs. A tracked removal produces a removal-only delta even when the
+inbox is now empty; the next scan with no inputs/removals produces none. Older
+queued/carry-over versions of that path are suppressed. Retained review payloads
+and old drafts remain historical evidence, not current pending work.
+
+Do not remove the pending index or `.looping_box.lock` to simulate this. Missing
+index with retained payloads is unavailable evidence, and unlinking a live lock
+can break coordination. See [RECOVERY](RECOVERY.md).
+
+## Inspect without changing work
+
+```sh
+looping-box worker context_builder --dry-run
+looping-box doctor
+looping-box review audit
+looping-box report --since 2026-10
+```
+
+Dry run plans artifacts/quarantines but creates no file, lock, history, or model
+request. Doctor inspects local health and suggests remedies; it does not repair
+or probe provider reachability. Reports filter event rows while retaining current
+pending count and full-chain integrity checks. The interactive session keeps the same
+workspace selection and isolated credentials throughout. When finished:
+
+```sh
+exit
+```
+
+This leaves the disposable workspace available at the printed path and restores
+your original shell environment. To repeat, start a new session and fresh root.
+
+The broader idea catalog and nine use-case scripts remain exploratory material:
+[101 ways](101-ways-to-use-this-project-for-fun-and-profit.md). Their presence is
+not a test result, release claim, or requirement to commercialize this tool.
