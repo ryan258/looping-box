@@ -4,6 +4,7 @@ import argparse
 import codecs
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,14 +16,17 @@ from ._util import (
     key_status as _key_status,
     default_root as _default_root,
     project_lock as _project_lock,
-    read_json as _read_json,
+    read_pending_review_index as _read_pending_review_index,
     rel as _rel,
+    review_identity as _review_identity,
     resolve_under_root as _resolve_under_root,
     sha256_file as _sha256_file,
     utc_now as _utc_now,
     write_json as _write_json,
 )
-from .action_policy import classify_reasons, match_keywords as _match_keywords
+from .action_policy import _read_action_config, classify_reasons, match_keywords as _match_keywords
+from .validation import ValidationError, validate_policy
+from .paths import directory_path, file_path as _file_path, read_validated, source_files
 
 
 STATE_SCHEMA = "looping-box.phase1.state.v1"
@@ -44,6 +48,7 @@ def run_phase1(
     """Run one deterministic local ingestion pass (serialized by the project lock)."""
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
+    _validated_sop(root_path, _resolve_under_root(root_path, sop_path))
     with _project_lock(root_path, generated_at):
         return _run_phase1_locked(
             root_path,
@@ -72,6 +77,15 @@ def _run_phase1_locked(
     resolved_delta_dir = _resolve_under_root(root_path, delta_dir)
     resolved_staging_dir = _resolve_under_root(root_path, staging_dir)
 
+    sop = _validated_sop(root_path, resolved_sop_path)
+    state = _read_state(resolved_state_path, input_dir=_rel(root_path, resolved_input_dir))
+    # Validate present queue evidence before the existing rebuild can overwrite it.
+    index = _read_pending_review_index(resolved_staging_dir / "pending_review.json")
+    for reference in index["reviews"]:
+        payload_path = _resolve_under_root(root_path, reference)
+        if payload_path.exists():
+            read_validated(payload_path, "review_payload")
+
     _ensure_layout(
         resolved_input_dir,
         resolved_sop_path.parent,
@@ -80,8 +94,6 @@ def _run_phase1_locked(
         resolved_staging_dir,
     )
 
-    sop = _read_json(resolved_sop_path)
-    state = _read_state(resolved_state_path)
     allowed_extensions = {
         extension.lower() for extension in sop.get("allowed_extensions", [".md", ".txt", ".json"])
     }
@@ -95,17 +107,19 @@ def _run_phase1_locked(
     warnings: list[dict[str, str]] = []
     all_review_reasons: list[str] = []
 
+    input_prefix = _rel(root_path, resolved_input_dir) + "/"
+    prior_present = set(state["present_paths"])
+    scanned_paths: list[str] = []
     for file_path in _iter_input_files(resolved_input_dir, root_path, allowed_extensions):
         relative_path = _rel(root_path, file_path)
-        content_hash = _sha256_file(file_path)
-        file_stat = file_path.stat()
+        scanned_paths.append(relative_path)
+        content_hash, size_bytes, text = _snapshot_input(file_path, max_file_bytes)
 
-        if file_stat.st_size > max_file_bytes:
-            # Fail closed: never read an oversized input into memory or a model
-            # prompt; a human decides whether it is processed at all.
+        if text is None:
+            # Oversized inputs are hashed in chunks, never decoded or excerpted.
+            # Approval can release only their empty local excerpt.
             text, matched_routes, review_reasons = "", [], ["oversized_input"]
         else:
-            text = _read_text(file_path)
             matched_routes = _match_routes(text, sop.get("routes", []))
             review_reasons = _match_keywords(
                 _gate_text(file_path, text),
@@ -115,7 +129,7 @@ def _run_phase1_locked(
         change = {
             "relative_path": relative_path,
             "sha256": content_hash,
-            "size_bytes": file_stat.st_size,
+            "size_bytes": size_bytes,
             "matched_routes": matched_routes,
             "review_reasons": review_reasons,
             "excerpt": _excerpt(text, int(sop.get("max_excerpt_chars", 500))),
@@ -125,13 +139,12 @@ def _run_phase1_locked(
             review_id = _review_id([change])
             decision, unverifiable = _decision_state(resolved_staging_dir, review_id)
             if decision == "approved" and not _processed_at_path(state, relative_path, content_hash):
-                # An approval releases the item into the pipeline exactly once,
-                # as ordinary work: without this, approving would only silence
-                # the gate and the approved content would never be processed.
+                # Retained processed state makes this a sequential one-time
+                # release. Deleting or rolling back that state can permit replay.
                 released = dict(change, review_reasons=[], approved_review=review_id)
                 changes.append(released)
                 released_ids.append(review_id)
-                _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
+                _record_processed(state, relative_path, content_hash, size_bytes, generated_at)
                 continue
             if decision is not None:
                 skipped.append(
@@ -141,7 +154,7 @@ def _run_phase1_locked(
                         "reason": "review_decision_recorded",
                     }
                 )
-                _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
+                _record_processed(state, relative_path, content_hash, size_bytes, generated_at)
                 continue
             if unverifiable:
                 warnings.append(
@@ -174,7 +187,11 @@ def _run_phase1_locked(
             continue
 
         changes.append(change)
-        _record_processed(state, relative_path, content_hash, file_stat.st_size, generated_at)
+        _record_processed(state, relative_path, content_hash, size_bytes, generated_at)
+
+    scanned_set = set(scanned_paths)
+    removed_paths = sorted(path for path in prior_present if path.startswith(input_prefix) and path not in scanned_set)
+    state["present_paths"] = sorted({path for path in prior_present if not path.startswith(input_prefix)} | scanned_set)
 
     boundary_gate = _build_boundary_gate(
         root_path,
@@ -191,7 +208,7 @@ def _run_phase1_locked(
         "skipped": len(skipped),
         "requires_review": bool(review_items),
     }
-    should_write_delta = summary["scanned"] > 0
+    should_write_delta = summary["scanned"] > 0 or bool(removed_paths)
     run_id = _unique_run_id(resolved_delta_dir, _run_id(generated_at))
     delta = {
         "schema": DELTA_SCHEMA,
@@ -210,6 +227,7 @@ def _run_phase1_locked(
         "changes": changes,
         "skipped": skipped,
         "warnings": warnings,
+        "reconciliation": {"scanned_paths": scanned_paths, "removed_paths": removed_paths},
         "boundary_gate": boundary_gate,
     }
 
@@ -241,15 +259,48 @@ def _run_phase1_locked(
     return delta
 
 
-def _read_text(path: Path) -> str:
-    """Decode an input for gating and excerpts. UTF-16 (BOM) is decoded properly and
-    stray NULs are dropped, so a UTF-16 file cannot hide its words from the gate."""
-    data = path.read_bytes()
+def _snapshot_input(path: Path, max_bytes: int) -> tuple[str, int, str | None]:
+    """Hash and decode one bounded snapshot; stream oversized files undecoded.
+
+    None denotes oversized input. Its hash is guarded by metadata checks around
+    the stream; a changing stream is evidence of input_changed, never success.
+    """
+    path = _file_path(path)
+    # No read-ahead buffer may survive the growth fallback's seek: the guarded
+    # stream must see bytes read after its initial metadata observation.
+    with path.open("rb", buffering=0) as handle:
+        if os.fstat(handle.fileno()).st_size <= max_bytes:
+            data = handle.read(max_bytes + 1)
+            if len(data) <= max_bytes:
+                return hashlib.sha256(data).hexdigest(), len(data), _decode_bytes(data)
+            del data  # grew beyond the cap: do not decode or keep the buffer
+        handle.seek(0)
+        before = os.fstat(handle.fileno())
+        digest = hashlib.sha256()
+        size_bytes = 0
+        while True:
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size_bytes += len(chunk)
+        after = os.fstat(handle.fileno())
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or size_bytes != after.st_size:
+            raise ValueError(f"input_changed: {path}: size or modification time changed during oversized read")
+        return digest.hexdigest(), size_bytes, None
+
+
+def _decode_bytes(data: bytes) -> str:
     if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         text = data.decode("utf-16", errors="replace")
     else:
         text = data.decode("utf-8", errors="replace")
     return text.replace("\x00", "")
+
+
+def _read_text(path: Path) -> str:
+    """Compatibility helper; ingestion decodes only its bounded snapshot."""
+    return _decode_bytes(_file_path(path).read_bytes())
 
 
 def _gate_text(path: Path, text: str) -> str:
@@ -266,55 +317,51 @@ def _gate_text(path: Path, text: str) -> str:
 
 def _ensure_layout(*directories: Path) -> None:
     for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory_path(directory).mkdir(parents=True, exist_ok=True)
 
 
-def _read_state(path: Path) -> dict[str, Any]:
+def _validated_sop(root: Path, path: Path) -> dict[str, Any]:
+    path = _file_path(path)
+    if not path.exists():
+        raise ValidationError(str(path), "$: required SOP is missing; run looping-box init", code="workspace_uninitialized")
+    sop = read_validated(path, "phase1_ingestion")
+    # Configuration must fail before any mutating entry point starts work.
+    for relative, kind in (("config/action_classes.json", "action_classes"),
+                           ("config/super_loop.json", "super_loop")):
+        optional = _resolve_under_root(root, relative)
+        if optional.exists():
+            read_validated(optional, kind)
+    validate_policy(sop, _read_action_config(root), str(path))
+    return sop
+
+
+def _read_state(path: Path, *, input_dir: str = "inbox") -> dict[str, Any]:
+    path = _file_path(path)
     if not path.exists():
         return {
             "schema": STATE_SCHEMA,
             "processed_files": {},
             "processed_hashes": {},
+            "present_paths": [],
             "runs": [],
         }
-    state = _read_json(path)
-    state.setdefault("schema", STATE_SCHEMA)
-    state.setdefault("processed_files", {})
-    state.setdefault("processed_hashes", {})
-    state.setdefault("runs", [])
-    return state
+    return read_validated(path, "phase1_state", input_dir=input_dir)
 
 
 def _iter_input_files(
     input_dir: Path, root: Path, allowed_extensions: set[str]
 ) -> list[Path]:
-    if not input_dir.exists():
-        return []
-
-    files: list[Path] = []
-    for path in input_dir.rglob("*"):
-        if path.is_symlink():
-            continue
-        if not path.is_file():
-            continue
-        if any(part.startswith(".") for part in path.relative_to(input_dir).parts):
-            continue
-        if path.suffix.lower() not in allowed_extensions:
-            continue
-        # read/hash can still race with filesystem changes; keep the resolved
-        # target inside the root as a final containment check.
-        real = path.resolve()
-        if real != root and root not in real.parents:
-            continue
-        files.append(path)
-    return sorted(files)
+    # Resolve only the trusted root, never a source descendant. The source walker
+    # excludes links before examining their target type or entering directories.
+    relative = input_dir.relative_to(root).as_posix()
+    return source_files(_resolve_under_root(root, relative), allowed_extensions)
 
 
 def _has_processed(state: dict[str, Any], relative_path: str, content_hash: str) -> bool:
     processed_file = state["processed_files"].get(relative_path)
     if processed_file and processed_file.get("sha256") == content_hash:
         return True
-    return content_hash in state["processed_hashes"]
+    return content_hash != hashlib.sha256(b"").hexdigest() and content_hash in state["processed_hashes"]
 
 
 def _processed_at_path(state: dict[str, Any], relative_path: str, content_hash: str) -> bool:
@@ -388,14 +435,27 @@ def _build_boundary_gate(
     reasons: list[str],
     review_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    index_path = staging_dir / "pending_review.json"
+    index_path = _file_path(staging_dir / "pending_review.json")
     # Every pending review is re-derived from the inbox each run, so the index is
     # rebuilt from the currently gated items: a review whose file was removed or
     # defused drops out instead of lingering as a phantom "operator action required".
+    # Validate retained payloads that this pass will reuse before creating any
+    # new payloads. Unreferenced historical files remain outside this read set.
+    for item in review_items:
+        existing = _file_path(staging_dir / "reviews" / f"{_review_id([item])}.json")
+        if existing.exists():
+            payload = read_validated(existing, "review_payload")
+            fields = ("relative_path", "sha256", "size_bytes", "matched_routes", "review_reasons", "excerpt")
+            stored = payload["source_items"][0]
+            if (payload["review_id"] != _review_id([item])
+                    or payload["risk_reasons"] != item["review_reasons"]
+                    or payload["action_class"] != classify_reasons(root, item["review_reasons"])
+                    or any(stored[field] != item[field] for field in fields)):
+                raise ValueError(f"review_evidence_invalid: {existing}: retained payload does not match current input")
     reviews: list[str] = []
     for item in review_items:
         review_id = _review_id([item])
-        review_payload_path = staging_dir / "reviews" / f"{review_id}.json"
+        review_payload_path = _file_path(staging_dir / "reviews" / f"{review_id}.json")
         review_payload = {
             "schema": REVIEW_PAYLOAD_SCHEMA,
             "review_id": review_id,
@@ -447,21 +507,7 @@ def _build_boundary_gate(
 
 
 def _review_id(review_items: list[dict[str, Any]]) -> str:
-    basis = json.dumps(
-        {
-            "items": [
-                {
-                    "relative_path": item.get("relative_path"),
-                    "sha256": item.get("sha256"),
-                    "review_reasons": item.get("review_reasons", []),
-                }
-                for item in review_items
-            ],
-        },
-        sort_keys=True,
-    )
-    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
-    return f"review-{digest}"
+    return _review_identity(review_items)
 
 
 def _run_id(generated_at: str) -> str:
@@ -474,7 +520,7 @@ def _unique_run_id(delta_dir: Path, base: str) -> str:
     # The supervisor archives observed deltas out of delta_dir, so check the
     # archive too, or a same-second run after archiving would reuse an existing
     # run id and make the audit trail ambiguous.
-    while (delta_dir / f"{run_id}.json").exists() or (
+    while _file_path(delta_dir / f"{run_id}.json").exists() or _file_path(
         delta_dir / "archive" / f"{run_id}.json"
     ).exists():
         run_id = f"{base}-{suffix}"
@@ -505,6 +551,11 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        args.root = Path(args.root).expanduser().resolve()
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(f"error: invalid_root: {args.root}: {exc}", file=sys.stderr)
+        return 1
+    try:
         delta = run_phase1(
             args.root,
             input_dir=args.input_dir,
@@ -517,10 +568,10 @@ def main() -> int:
         print(f"busy: {exc}", file=sys.stderr)
         return 1
     except FileNotFoundError as exc:
-        print(f"error: {exc.filename} not found. Is this a workspace? Try: looping-box init", file=sys.stderr)
+        print(f"error: workspace_uninitialized: {exc.filename} not found. Is this a workspace? Try: looping-box init", file=sys.stderr)
         return 1
     except (ValueError, OSError) as exc:  # corrupt SOP/state JSON, path outside the root, ...
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: phase1_error: {exc}", file=sys.stderr)
         return 1
 
     print(f"delta: {delta['delta_path'] or 'none'}")

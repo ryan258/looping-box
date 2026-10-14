@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
 import time
@@ -12,16 +11,19 @@ from ._util import (
     append_audit as _append_audit_event,
     default_root as _default_root,
     project_lock as _project_lock,
-    read_json as _read_json,
     rel as _rel,
     resolve_under_root as _resolve_under_root,
-    sha256_file as _sha256_file,
+    read_json as _read_json,
     utc_now as _utc_now,
     write_json as _write_json,
+    write_bytes as _write_bytes,
 )
-from .phase1 import DELTA_SCHEMA
+from .validation import validate_data
+from .paths import UnsafePathError, contained_path, directory_path, file_path, read_validated, tree_entries
+from .phase1 import _validated_sop
 from .review import list_reviews
-from .worker import run_worker
+from .worker import _validate_existing_worker_artifacts, _validated_delta, execution_needs_run, run_worker
+from .eligibility import SourceReingestRequired
 
 
 WORLD_STATE_SCHEMA = "looping-box.world-state.v1"
@@ -45,8 +47,16 @@ def run_supervisor(root: Path | str, *, now: str | None = None) -> dict[str, Any
     """Run one deterministic supervisor pass."""
     root_path = Path(root).resolve()
     generated_at = now or _utc_now()
-    config = _read_config(root_path)
-    with _project_lock(root_path, generated_at, int(config.get("stale_lock_seconds", 300))):
+    # Preserve side-effect-free rejection of malformed configuration; read it
+    # again under the lock so planning never relies on an unlocked snapshot.
+    _read_config(root_path)
+    _validated_sop(root_path, _resolve_under_root(root_path, "config/sops/phase1_ingestion.json"))
+    with _project_lock(root_path, generated_at, DEFAULT_CONFIG["stale_lock_seconds"]):
+        config = _read_config(root_path)
+        _validated_sop(root_path, _resolve_under_root(root_path, "config/sops/phase1_ingestion.json"))
+        # Validate the whole worker set while holding the same lock as writers.
+        for worker_id in ("context_builder", "execution_engine"):
+            _validate_existing_worker_artifacts(root_path, worker_id)
         return _run_supervisor_locked(root_path, generated_at, config)
 
 
@@ -54,80 +64,66 @@ def load_world_state(root: Path | str) -> dict[str, Any]:
     root_path = Path(root).resolve()
     state_path = _resolve_under_root(root_path, ".world_state.json")
     if not state_path.exists():
+        dependent = ["cache/supervisor/blocked.json"]
+        dependent.extend(f"cache/workers/{worker}/{name}" for worker in ("context_builder", "execution_engine")
+                         for name in ("state.json", "last_output.json"))
+        for reference in dependent:
+            if file_path(_resolve_under_root(root_path, reference)).exists():
+                raise ValueError(f"state_inconsistent: {state_path}: missing with dependent {reference}")
         return _default_world_state()
-    state = _read_json(state_path)
-    if state.get("schema") != WORLD_STATE_SCHEMA:
-        raise ValueError(f"unsupported world state schema: {state.get('schema')!r}")
-    state.setdefault("registered_loops", ["phase1", "context_builder", "execution_engine"])
-    state.setdefault("worker_states", {})
-    state.setdefault("observed_deltas", [])
-    state.setdefault("dirty", False)
-    state.setdefault("dependencies", list(DEFAULT_CONFIG["dependencies"]))
-    state.setdefault("recovery", _clear_recovery())
-    state.setdefault("runs", [])
-    state.setdefault("leases", {})
+    state = read_validated(state_path, "world_state")
+    for worker_id in ("context_builder", "execution_engine"):
+        _validate_existing_worker_artifacts(root_path, worker_id)
+    for worker_id, summary in state["worker_states"].items():
+        output = file_path(_resolve_under_root(root_path, summary["last_output"]))
+        if not output.exists():
+            raise ValueError(f"state_inconsistent: {state_path}: required worker output {output} is missing")
+        read_validated(output, "worker_output", worker_id=worker_id)
     return state
 
 
 _RESOURCE_LIMIT_REASONS = {"file_count_limit", "payload_size_limit", "worker_timeout"}
 
 
+def _next_action(reason: str) -> str:
+    if "source_reingest_required" in reason:
+        return "ingest the changed source with looping-box phase1, then retry the supervisor"
+    if "model" in reason:
+        return "fix model configuration/provider availability, then run looping-box-supervisor --once"
+    if "routing_disabled" in reason:
+        return "enable the required workers/dependency in config/super_loop.json, then run looping-box-supervisor --once"
+    if any(code in reason for code in _RESOURCE_LIMIT_REASONS):
+        return "inspect retained work and raise the matching limit in config/super_loop.json, then run looping-box-supervisor --once"
+    if "schema" in reason:
+        return "preserve evidence; use a compatible version or deliberately migrate the named artifact"
+    return "preserve and inspect/restore the named evidence, then run looping-box-supervisor --once"
+
+
 def status_summary(root: Path | str) -> str:
     root_path = Path(root).resolve()
     state = load_world_state(root_path)
     recovery = state["recovery"]
-    # Live pending reviews, not just the last supervisor run: a gate trip or an
-    # approval is visible here immediately.
     pending = list_reviews(root_path)
-    pending_line = [f"pending reviews: {len(pending)} (looping-box-review list)"] if pending else []
-    unverifiable = sum(1 for review in pending if review.get("unverifiable_decision"))
+    details = [f"last run: {state.get('last_run_at') or 'never (no run evidence)'}",
+               f"pending reviews: {len(pending)} (looping-box-review list)"]
+    unverifiable = sum(bool(review.get("unverifiable_decision")) for review in pending)
     if unverifiable:
-        pending_line.append(
-            f"warning: {unverifiable} decision record(s) did not verify (run: looping-box-review key)"
-        )
+        details.append(f"warning: {unverifiable} decision record(s) did not verify (run: looping-box-review key)")
+    if recovery.get("last_error"):
+        return "\n".join(["status: failed", f"error: {recovery['last_error']}", *details,
+                          "Next: " + _next_action(recovery["last_error"])])
     if recovery.get("operator_action_required"):
         payload = recovery.get("pending_review_payload") or "cache/supervisor/blocked.json"
-        # Resource-limit blocks (see docs/RECOVERY.md) have no source file to
-        # handle; the fix is a config/super_loop.json change or a smaller batch.
-        # Content-review blocks point at staging/pending_review.json instead.
-        if recovery.get("blocked_reason") in _RESOURCE_LIMIT_REASONS:
-            next_step = (
-                "inspect the pending payload, then raise the matching limit in "
-                "config/super_loop.json (work already ingested is kept and runs once you do), "
-                "then run looping-box-supervisor --once"
-            )
+        reason = recovery.get("blocked_reason") or "review"
+        if reason in _RESOURCE_LIMIT_REASONS or reason == "routing_disabled":
+            next_step = _next_action(reason)
         else:
-            next_step = (
-                "decide each pending review (looping-box-review approve|reject), or handle "
-                "the source file, then run ./startday.sh"
-            )
-        return "\n".join(
-            ["status: operator action required", f"pending: {payload}", *pending_line, f"Next: {next_step}"]
-        )
-    if recovery.get("last_error"):
-        return "\n".join(
-            [
-                "status: failed",
-                f"error: {recovery['last_error']}",
-                *pending_line,
-                "Next: fix the error and run looping-box-supervisor --once",
-            ]
-        )
+            next_step = "inspect/decide pending reviews (looping-box-review approve|reject), or deliberately edit/remove source then ingest"
+        return "\n".join(["status: operator action required", f"pending: {payload}", *details, f"Next: {next_step}"])
     if pending:
-        return "\n".join(
-            [
-                "status: operator action required",
-                *pending_line,
-                "Next: decide each pending review, then run ./startday.sh",
-            ]
-        )
-    return "\n".join(
-        [
-            "status: clear",
-            f"last run: {state.get('last_run_at', 'never')}",
-            "Next: ./startday.sh",
-        ]
-    )
+        return "\n".join(["status: operator action required", *details,
+                          "Next: inspect/decide each pending review, or deliberately edit/remove source then ingest"])
+    return "\n".join(["status: clear", *details, "Next: ./startday.sh"])
 
 
 def _run_supervisor_locked(
@@ -136,109 +132,133 @@ def _run_supervisor_locked(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     state = load_world_state(root)
+    list_reviews(root)  # Validate live evidence before resource checks or worker side effects.
+    state["registered_loops"] = ["phase1"] + list(config["workers"])
+    state["dependencies"] = list(config["dependencies"])
     delta_paths = _phase1_delta_paths(root)
-    observed = set(state["observed_deltas"])
-    new_deltas = [path for path in delta_paths if _rel(root, path) not in observed]
+    consumed = _consumed_delta_refs(root)
+    new_deltas = []
+    for path in delta_paths:
+        if _rel(root, path) in consumed:
+            try:
+                _validated_delta(_read_json(path), path)
+            except UnsafePathError:
+                raise
+            except (OSError, ValueError, RecursionError):
+                pass  # Previously consumed but now invalid evidence still needs intake.
+            else:
+                continue
+        new_deltas.append(path)
     new_delta_refs = [_rel(root, path) for path in new_deltas]
     changed_file_count = _changed_file_count(new_deltas)
-
-    max_files = int(config.get("max_files_per_cycle", DEFAULT_CONFIG["max_files_per_cycle"]))
+    max_files = config["max_files_per_cycle"]
     if changed_file_count > max_files:
-        return _blocked(
-            root,
-            state,
-            generated_at,
-            "file_count_limit",
-            f"{changed_file_count} changed files exceeds limit {max_files}",
-            new_delta_refs,
-        )
+        return _blocked(root, state, generated_at, "file_count_limit",
+                        f"{changed_file_count} changed files exceeds limit {max_files}", new_delta_refs)
 
     plan: list[str] = []
-    worker_outputs: list[dict[str, Any]] = []
-    # Resource-limit blocks (worker_timeout, payload_size_limit) must be as durable
-    # as file_count_limit: a worker call already persists its own state (consumed
-    # inputs, last-seen hash) as a side effect, so a post-hoc block that doesn't
-    # undo that would silently self-heal on the next run with no operator action.
-    # Snapshot worker-local state and artifacts before each run and restore them
-    # if we end up blocking.
-    ran_workers: dict[str, tuple[dict[str, bytes], set[str]] | None] = {}
-    if new_deltas and _can_route(config, "phase1_delta", "context_builder"):
+    outputs: list[dict[str, Any]] = []
+    snapshots: dict[str, tuple[dict[str, bytes], set[str]] | None] = {}
+    if new_deltas:
+        if not _can_route(config, "phase1_delta", "context_builder"):
+            return _blocked(root, state, generated_at, "routing_disabled",
+                            "phase1_delta -> context_builder is disabled; intake remains queued", new_delta_refs)
         plan.append("context_builder")
+        snapshots["context_builder"] = _snapshot_worker_dir(root, "context_builder")
+        output = _run_worker_with_runtime(root, "context_builder", generated_at, config)
+        outputs.append(output)
+        if _is_worker_timeout(output):
+            return _blocked_with_rollback(root, state, generated_at, "worker_timeout",
+                                          "context_builder exceeded its runtime limit", new_delta_refs, snapshots,
+                                          plan=plan, worker_outputs=outputs)
 
-    context_needs_execution_before_run = _execution_needs_context(root)
-    if (
-        context_needs_execution_before_run
-        and "context_builder" not in plan
-        and _can_route(config, "context_builder", "execution_engine")
-    ):
-        plan.append("execution_engine")
-
-    if "context_builder" in plan:
-        ran_workers["context_builder"] = _snapshot_worker_dir(root, "context_builder")
-        context_output = _run_worker_with_runtime(root, "context_builder", generated_at, config)
-        worker_outputs.append(context_output)
-        if _is_worker_timeout(context_output):
-            return _blocked_with_rollback(
-                root, state, generated_at, "worker_timeout",
-                context_output["errors"][0]["message"], new_delta_refs, ran_workers,
-            )
-        # A context_builder that went idle (its delta was already consumed) must
-        # not strand execution: after an execution failure the retry has nothing
-        # new for context_builder, but execution still needs to run.
-        if (
-            (context_output["status"] in {"complete", "blocked"} or _execution_needs_context(root))
-            and _can_route(config, "context_builder", "execution_engine")
-            and "execution_engine" not in plan
-        ):
+    context_failed = any(output["status"] == "failed" for output in outputs)
+    needs_execution = False
+    if not context_failed:
+        try:
+            needs_execution = _execution_needs_context(root)
+        except SourceReingestRequired:
+            if not _can_route(config, "context_builder", "execution_engine"):
+                raise  # Invalid evidence takes precedence over disabled routing.
+            # Let the worker persist the structured failure, using the same predicate.
+            needs_execution = True
+        needs_execution = needs_execution or any(output["status"] in {"complete", "blocked"} for output in outputs)
+        if needs_execution and _can_route(config, "context_builder", "execution_engine"):
             plan.append("execution_engine")
+            snapshots["execution_engine"] = _snapshot_worker_dir(root, "execution_engine")
+            output = _run_worker_with_runtime(root, "execution_engine", generated_at, config)
+            outputs.append(output)
+            if _is_worker_timeout(output):
+                return _blocked_with_rollback(root, state, generated_at, "worker_timeout",
+                                              "execution_engine exceeded its runtime limit", new_delta_refs, snapshots,
+                                              plan=plan, worker_outputs=outputs)
 
-    if "execution_engine" in plan:
-        ran_workers["execution_engine"] = _snapshot_worker_dir(root, "execution_engine")
-        execution_output = _run_worker_with_runtime(root, "execution_engine", generated_at, config)
-        worker_outputs.append(execution_output)
-        if _is_worker_timeout(execution_output):
-            return _blocked_with_rollback(
-                root, state, generated_at, "worker_timeout",
-                execution_output["errors"][0]["message"], new_delta_refs, ran_workers,
-            )
-
-    payload_limit = int(config.get("max_payload_bytes", DEFAULT_CONFIG["max_payload_bytes"]))
-    oversized = _oversized_artifact(root, worker_outputs, payload_limit)
+    limit = config["max_payload_bytes"]
+    oversized = _oversized_artifact(root, outputs, limit)
     if oversized is not None:
-        return _blocked_with_rollback(
-            root, state, generated_at, "payload_size_limit",
-            f"{oversized} exceeds limit {payload_limit} bytes", new_delta_refs, ran_workers,
-        )
+        return _blocked_with_rollback(root, state, generated_at, "payload_size_limit",
+                                      f"{oversized} exceeds limit {limit} bytes", new_delta_refs, snapshots,
+                                      plan=plan, worker_outputs=outputs)
+    if needs_execution and not _can_route(config, "context_builder", "execution_engine"):
+        return _blocked(root, state, generated_at, "routing_disabled",
+                        "context_builder -> execution_engine is disabled; context remains queued", new_delta_refs,
+                        plan=plan, worker_outputs=outputs)
 
-    status = _overall_status(worker_outputs)
-    state["registered_loops"] = ["phase1"] + list(config.get("workers", DEFAULT_CONFIG["workers"]))
-    state["dependencies"] = list(config.get("dependencies", DEFAULT_CONFIG["dependencies"]))
-    state["dirty"] = bool(plan)
+    status = _overall_status(outputs)
+    recovery = _recovery_from_outputs(root, outputs)
+    if recovery["operator_action_required"] and status != "failed":
+        status = "blocked"
+    if status != "failed":
+        acknowledgements = _acknowledged_delta_refs(root, delta_paths)
+        remaining = _archive_observed_deltas(root, acknowledgements)
+        _prune_worker_consumed_inputs(root, set(acknowledgements) - set(remaining))
+        state["observed_deltas"] = remaining
+        if remaining:
+            status = "failed"
+            recovery = {**_clear_recovery(), "last_error": "delta_archive_error: could not archive " + ", ".join(remaining)}
+    return _finish_supervisor(root, state, generated_at, status, plan, outputs, recovery, new_delta_refs)
+
+
+def _consumed_delta_refs(root: Path) -> set[str]:
+    path = _resolve_under_root(root, "cache/workers/context_builder/state.json")
+    return set(read_validated(path, "worker_state", worker_id="context_builder")["consumed_inputs"]) if path.exists() else set()
+
+
+def _acknowledged_delta_refs(root: Path, paths: list[Path]) -> list[str]:
+    context_path = _resolve_under_root(root, "cache/workers/context_builder/context_package.json")
+    if not context_path.exists():
+        return []
+    context = read_validated(context_path, "context_package")
+    retained = set(context["source_deltas"]) & _consumed_delta_refs(root)
+    acknowledged = []
+    for path in paths:
+        reference = _rel(root, path)
+        if reference not in retained or not path.exists():
+            continue
+        try:
+            _validated_delta(_read_json(path), path)
+        except UnsafePathError:
+            raise
+        except (OSError, ValueError, RecursionError):
+            continue
+        acknowledged.append(reference)
+    return acknowledged
+
+
+def _finish_supervisor(root: Path, state: dict[str, Any], generated_at: str, status: str,
+                       plan: list[str], outputs: list[dict[str, Any]], recovery: dict[str, Any],
+                       source_deltas: list[str], *, update_workers: bool = True) -> dict[str, Any]:
+    state["dirty"] = bool(plan) or status in {"blocked", "failed"}
     state["last_run_at"] = generated_at
-    if status in {"complete", "blocked", "idle"}:
-        state["observed_deltas"] = _archive_observed_deltas(root, sorted(observed.union(new_delta_refs)))
-        _prune_worker_consumed_inputs(root, set(state["observed_deltas"]))
-    state["worker_states"].update(_worker_states(root, worker_outputs))
-    state["recovery"] = _recovery_from_outputs(root, worker_outputs)
-    state["runs"].append(
-        {
-            "generated_at": generated_at,
-            "status": status,
-            "plan": plan,
-            "source_deltas": new_delta_refs,
-        }
-    )
+    if update_workers:
+        state["worker_states"].update(_worker_states(root, outputs))
+    state["recovery"] = recovery
+    state["runs"].append({"generated_at": generated_at, "status": status, "plan": list(plan), "source_deltas": source_deltas})
     state["runs"] = state["runs"][-50:]
+    result = {"schema": "looping-box.supervisor.run.v1", "generated_at": generated_at, "status": status,
+              "plan": list(plan), "worker_outputs": outputs, "recovery": recovery}
+    _append_audit(root, generated_at, result, source_deltas)
     _write_json(_resolve_under_root(root, ".world_state.json"), state)
-    result = {
-        "schema": "looping-box.supervisor.run.v1",
-        "generated_at": generated_at,
-        "status": status,
-        "plan": plan,
-        "worker_outputs": worker_outputs,
-        "recovery": state["recovery"],
-    }
-    _append_audit(root, generated_at, result, new_delta_refs)
     return result
 
 
@@ -257,8 +277,8 @@ def _snapshot_worker_dir(
         return None
     files: dict[str, bytes] = {}
     history: set[str] = set()
-    for child in path.rglob("*"):
-        if child.is_file() and not child.is_symlink():
+    for child in tree_entries(path):
+        if child.is_file():
             relative = child.relative_to(path).as_posix()
             if relative.startswith("history/"):
                 history.add(relative)
@@ -270,31 +290,37 @@ def _snapshot_worker_dir(
 def _restore_worker_dir(
     root: Path, worker_id: str, snapshot: tuple[dict[str, bytes], set[str]] | None
 ) -> None:
-    path = _worker_dir(root, worker_id)
+    path = directory_path(_worker_dir(root, worker_id))
+    entries = tree_entries(path)  # fail before deleting or restoring any entry
+    if snapshot is not None:
+        for reference in snapshot[0]:
+            file_path(contained_path(path, reference))
+        for reference in snapshot[1]:
+            file_path(contained_path(path, reference))
     if snapshot is None:
         if path.exists():
             shutil.rmtree(path)
         return
     files, history = snapshot
+    # Restore complete artifacts before their state markers, without first
+    # deleting the current version. A failed replace preserves that file.
+    ordered = sorted(files, key=lambda name: (name == "state.json", name == "last_output.json", name))
+    for relative_path in ordered:
+        target = file_path(contained_path(path, relative_path))
+        _write_bytes(target, files[relative_path])
     if path.exists():
-        # Remove everything the blocked run wrote, including history it created;
-        # history that existed before the run stays.
-        for child in sorted(path.rglob("*"), reverse=True):
-            if child.is_dir() and not child.is_symlink():
+        for child in sorted(entries, reverse=True):
+            if child.is_dir():
                 try:
                     child.rmdir()
                 except OSError:
-                    pass  # still holds preserved history
-            elif child.relative_to(path).as_posix() not in history:
+                    pass  # still holds preserved files/history
+            elif child.relative_to(path).as_posix() not in history | files.keys():
                 child.unlink()
-    for relative_path, content in files.items():
-        target = path / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
 
 
 def _is_worker_timeout(output: dict[str, Any]) -> bool:
-    return output["status"] == "blocked" and any(
+    return any(
         error.get("code") == "worker_timeout" for error in output["errors"]
     )
 
@@ -307,59 +333,37 @@ def _blocked_with_rollback(
     message: str,
     source_deltas: list[str],
     ran_workers: dict[str, tuple[dict[str, bytes], set[str]] | None],
+    *, plan: list[str] | None = None, worker_outputs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     # Undo state and artifacts each ran worker already persisted so the audit
     # trail matches the rolled-back world state.
     for worker_id, snapshot in ran_workers.items():
         _restore_worker_dir(root, worker_id, snapshot)
-    return _blocked(root, state, generated_at, reason, message, source_deltas)
+    attempted = []
+    for output in worker_outputs or []:
+        attempted.append({**output, "status": "failed" if output["status"] == "failed" else "blocked",
+                          "outputs": {"artifacts": []},
+                          "errors": [*output["errors"], {"code": reason, "message": "worker files restored: " + message}]})
+    return _blocked(root, state, generated_at, reason, message, source_deltas,
+                    plan=plan, worker_outputs=attempted, update_workers=False)
 
 
 def _blocked(
-    root: Path,
-    state: dict[str, Any],
-    generated_at: str,
-    reason: str,
-    message: str,
-    source_deltas: list[str],
+    root: Path, state: dict[str, Any], generated_at: str, reason: str, message: str,
+    source_deltas: list[str], *, plan: list[str] | None = None,
+    worker_outputs: list[dict[str, Any]] | None = None, update_workers: bool = True,
 ) -> dict[str, Any]:
     payload_path = _resolve_under_root(root, "cache/supervisor/blocked.json")
-    payload = {
-        "schema": SUPERVISOR_BLOCKED_SCHEMA,
-        "generated_at": generated_at,
-        "reason": reason,
-        "message": message,
-        "source_deltas": source_deltas,
-    }
+    payload = {"schema": SUPERVISOR_BLOCKED_SCHEMA, "generated_at": generated_at,
+               "reason": reason, "message": message, "source_deltas": source_deltas}
     _write_json(payload_path, payload)
-    state["dirty"] = True
-    state["last_run_at"] = generated_at
-    state["recovery"] = {
-        "last_error": None,
-        "blocked_reason": reason,
-        "pending_review_payload": _rel(root, payload_path),
-        "operator_action_required": True,
-    }
-    state["runs"].append(
-        {
-            "generated_at": generated_at,
-            "status": "blocked",
-            "plan": [],
-            "source_deltas": source_deltas,
-        }
-    )
-    state["runs"] = state["runs"][-50:]
-    _write_json(_resolve_under_root(root, ".world_state.json"), state)
-    result = {
-        "schema": "looping-box.supervisor.run.v1",
-        "generated_at": generated_at,
-        "status": "blocked",
-        "plan": [],
-        "worker_outputs": [],
-        "recovery": state["recovery"],
-    }
-    _append_audit(root, generated_at, result, source_deltas)
-    return result
+    outputs = worker_outputs or []
+    failure = next((output for output in outputs if output["status"] == "failed"), None)
+    recovery = {"last_error": (failure["errors"][0]["message"] if failure["errors"] else "worker failed") if failure else None,
+                "blocked_reason": reason, "pending_review_payload": _rel(root, payload_path),
+                "operator_action_required": True}
+    return _finish_supervisor(root, state, generated_at, "failed" if failure else "blocked", plan or [],
+                              outputs, recovery, source_deltas, update_workers=update_workers)
 
 
 def _default_world_state() -> dict[str, Any]:
@@ -392,27 +396,35 @@ def _read_config(root: Path) -> dict[str, Any]:
     config_path = _resolve_under_root(root, "config/super_loop.json")
     config = dict(DEFAULT_CONFIG)
     if config_path.exists():
-        config.update(_read_json(config_path))
-    return config
+        config.update(read_validated(config_path, "super_loop"))
+    return validate_data(config, "super_loop", str(config_path))
 
 
 def _phase1_delta_paths(root: Path) -> list[Path]:
-    delta_dir = _resolve_under_root(root, "cache/deltas")
-    return sorted(delta_dir.glob("*.json")) if delta_dir.exists() else []
+    delta_dir = directory_path(_resolve_under_root(root, "cache/deltas"))
+    try:
+        entries = list(delta_dir.iterdir())
+    except FileNotFoundError:
+        return []
+    return [file_path(path) for path in sorted(entries) if path.name.endswith(".json")]
 
 
 def _archive_observed_deltas(root: Path, observed_refs: list[str]) -> list[str]:
-    archive_dir = _resolve_under_root(root, "cache/deltas/archive")
+    archive_dir = directory_path(_resolve_under_root(root, "cache/deltas/archive"))
     active_refs: list[str] = []
     for delta_ref in observed_refs:
         delta_path = _resolve_under_root(root, delta_ref)
         if not delta_path.exists():
+            active_refs.append(delta_ref)  # Disappearance is not an archive acknowledgement.
             continue
         try:
-            archive_dir.mkdir(parents=True, exist_ok=True)
             archive_path = _unique_archive_path(archive_dir / delta_path.name)
+            _validated_delta(_read_json(delta_path), delta_path)
+            archive_dir.mkdir(parents=True, exist_ok=True)
             delta_path.replace(archive_path)
-        except OSError:
+        except UnsafePathError:
+            raise
+        except (OSError, ValueError, RecursionError):
             active_refs.append(delta_ref)
     return active_refs
 
@@ -422,21 +434,21 @@ def _unique_archive_path(path: Path) -> Path:
     suffix = 2
     # Keep the .json extension on collision renames so archive globs and the
     # delta's embedded delta_path stay meaningful.
-    while candidate.exists():
+    while file_path(candidate).exists():
         candidate = path.with_name(f"{path.stem}-{suffix}{path.suffix}")
         suffix += 1
     return candidate
 
 
-def _prune_worker_consumed_inputs(root: Path, active_delta_refs: set[str]) -> None:
+def _prune_worker_consumed_inputs(root: Path, archived_delta_refs: set[str]) -> None:
     state_path = _resolve_under_root(root, "cache/workers/context_builder/state.json")
-    if not state_path.exists():
+    if not state_path.exists() or not archived_delta_refs:
         return
-    state = _read_json(state_path)
+    state = read_validated(state_path, "worker_state", worker_id="context_builder")
     state["consumed_inputs"] = [
         delta_ref
         for delta_ref in state.get("consumed_inputs", [])
-        if delta_ref in active_delta_refs
+        if delta_ref not in archived_delta_refs
     ]
     _write_json(state_path, state)
 
@@ -457,23 +469,17 @@ def _changed_file_count(delta_paths: list[Path]) -> int:
     count = 0
     for path in delta_paths:
         try:
-            delta = _read_json(path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if delta.get("schema") == DELTA_SCHEMA:
-            count += sum(1 for change in delta.get("changes", []) if not change.get("review_reasons"))
+            delta = _validated_delta(_read_json(path), path)
+        except UnsafePathError:
+            raise
+        except (OSError, ValueError, RecursionError):
+            continue  # Intake owns quarantine/error classification; invalid data is never counted.
+        count += sum(1 for change in delta["changes"] if not change["review_reasons"])
     return count
 
 
 def _execution_needs_context(root: Path) -> bool:
-    context_path = _resolve_under_root(root, "cache/workers/context_builder/context_package.json")
-    if not context_path.exists():
-        return False
-    state_path = _resolve_under_root(root, "cache/workers/execution_engine/state.json")
-    if not state_path.exists():
-        return True
-    state = _read_json(state_path)
-    return state.get("last_context_sha256") != _sha256_file(context_path)
+    return execution_needs_run(root)
 
 
 def _oversized_artifact(
@@ -532,8 +538,9 @@ def _run_worker_with_runtime(
     runtime_seconds = time.monotonic() - started
     output["runtime_seconds"] = round(runtime_seconds, 6)
     if runtime_seconds > max_runtime:
-        output["status"] = "blocked"
-        output["errors"] = [
+        if output["status"] != "failed":
+            output["status"] = "blocked"
+        output["errors"] = [*output["errors"],
             {
                 "code": "worker_timeout",
                 "message": f"{worker_id} exceeded {max_runtime} seconds",
@@ -551,6 +558,9 @@ def _recovery_from_outputs(root: Path, worker_outputs: list[dict[str, Any]]) -> 
                 "pending_review_payload": None,
                 "operator_action_required": False,
             }
+    if list_reviews(root):
+        return {"last_error": None, "blocked_reason": "pending_review",
+                "pending_review_payload": "staging/pending_review.json", "operator_action_required": True}
     for output in worker_outputs:
         if output["status"] == "blocked":
             payload = _pending_payload_from_context(root)
@@ -568,7 +578,7 @@ def _pending_payload_from_context(root: Path) -> str | None:
     context_path = _resolve_under_root(root, "cache/workers/context_builder/context_package.json")
     if not context_path.exists():
         return None
-    context = _read_json(context_path)
+    context = read_validated(context_path, "context_package")
     for item in context.get("blocked_inputs", []):
         payload = item.get("pending_review_payload")
         if payload:
@@ -606,15 +616,20 @@ def main() -> int:
     if not args.status and not args.once:
         parser.error("pass --once to run a supervisor pass, or --status to inspect state")
     try:
+        args.root = Path(args.root).expanduser().resolve()
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(f"error: invalid_root: {args.root}: {exc}", file=sys.stderr)
+        return 1
+    try:
         if args.status:
             print(status_summary(args.root))
             return 0
         result = run_supervisor(args.root)
     except RuntimeError as exc:  # another phase1/supervisor/review holds the lock
-        print(f"busy: {exc}", file=sys.stderr)
+        print(f"busy: {exc}\nNext: wait for the current lock owner, then retry", file=sys.stderr)
         return 1
     except (ValueError, OSError) as exc:  # corrupt world state/config JSON, unknown schema, ...
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: evidence unavailable: {exc}\nNext: {_next_action(str(exc))}", file=sys.stderr)
         return 1
     print(f"status: {result['status']}")
     print(f"plan: {', '.join(result['plan']) if result['plan'] else 'none'}")

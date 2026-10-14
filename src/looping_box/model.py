@@ -18,6 +18,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from .paths import file_path
+
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 _env_loaded_for: set[str] = set()
@@ -36,13 +38,14 @@ class ModelError(RuntimeError):
 
 def load_env(root: Path | str = ".") -> None:
     """Load OPENROUTER_*/MODEL_* from `<root>/.env` into os.environ once per root. Existing vars win."""
-    key = str(Path(root).resolve())
+    root_path = Path(root).resolve()
+    env_path = file_path(root_path / ".env")
+    key = str(root_path)
     # ponytail: one-shot CLIs benefit from process-lifetime caching. If daemon
     # mode lands, reload semantics should change so .env edits can take effect.
     if key in _env_loaded_for:
         return
     _env_loaded_for.add(key)
-    env_path = Path(root) / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -53,6 +56,22 @@ def load_env(root: Path | str = ".") -> None:
         name = name.strip().removeprefix("export ").strip()
         if name.startswith(_ENV_PREFIXES):
             os.environ.setdefault(name, value.strip().strip('"').strip("'"))
+
+
+def inspect_settings(root: Path | str) -> dict[str, str]:
+    """Fresh model settings for diagnostics, without changing the process environment/cache."""
+    settings = {name: value for name, value in os.environ.items() if name.startswith(_ENV_PREFIXES)}
+    path = file_path(Path(root).resolve() / ".env")
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, _, value = stripped.partition("=")
+            name = name.strip().removeprefix("export ").strip()
+            if name.startswith(_ENV_PREFIXES):
+                settings.setdefault(name, value.strip().strip('"').strip("'"))
+    return settings
 
 
 def model_for(role: str) -> str | None:
@@ -72,6 +91,17 @@ def _http_post(url: str, headers: dict[str, str], body: bytes, timeout: float) -
 
 
 _transport: Callable[[str, dict[str, str], bytes, float], str] = _http_post
+
+
+def redact_error(value: object) -> str:
+    """Sanitize configured credentials before callers truncate or persist errors."""
+    text = str(value)
+    secret = os.environ.get("OPENROUTER_API_KEY")
+    if secret:
+        forms = {secret, json.dumps(secret)[1:-1], repr(secret)[1:-1]}
+        for form in sorted(forms, key=len, reverse=True):
+            text = text.replace(form, "[REDACTED]")
+    return text
 
 
 def complete(
@@ -107,18 +137,22 @@ def complete(
         raw = _transport(f"{base_url}/chat/completions", headers, body, timeout)
         data = json.loads(raw)
         if isinstance(data, dict) and data.get("error"):
-            raise ValueError(f"provider error: {str(data['error'])[:200]}")
+            raise ValueError(f"provider error: {redact_error(data['error'])[:200]}")
         text = data["choices"][0]["message"]["content"]
         if not isinstance(text, str):  # refusals / tool calls come back as null content
             raise ValueError("response had no text content")
+        returned_model = data.get("model", model)
+        if not isinstance(returned_model, str) or not returned_model:
+            raise ValueError("response had no valid model ID")
+        response_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     except Exception as exc:  # network, JSON, or unexpected provider shape
-        raise ModelError(f"{role} model call failed: {exc}") from exc
+        raise ModelError(f"{role} model call failed: {redact_error(exc)}") from None
     # temperature=0 is requested, but providers don't guarantee determinism, so
     # callers key idempotency on (input hash + model id) and store this hash.
     return {
         "text": text,
-        "model": data.get("model", model),
-        "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "model": returned_model,
+        "response_sha256": response_sha256,
     }
 
 
