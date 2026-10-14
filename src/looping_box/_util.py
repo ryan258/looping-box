@@ -7,11 +7,15 @@ import hmac
 import json
 import os
 import secrets
-import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from . import locking
+from .validation import ValidationError, validate_data
+from .paths import UnsafePathError, contained_path, directory_path, file_path, read_validated
 
 PENDING_REVIEW_INDEX_SCHEMA = "looping-box.pending-review-index.v1"
 AUDIT_EVENT_SCHEMA = "looping-box.audit-event.v1"
@@ -24,13 +28,7 @@ def default_root() -> str:
 
 
 def resolve_under_root(root: Path, value: Path | str) -> Path:
-    path = Path(value)
-    candidate = (path if path.is_absolute() else root / path).resolve()
-    # The repo boundary is part of the safety model: refuse to read or write
-    # outside root (incl. via absolute paths or `..` traversal). Fail closed.
-    if candidate != root and root not in candidate.parents:
-        raise ValueError(f"path escapes project root: {value!r} -> {candidate}")
-    return candidate
+    return contained_path(root, value)
 
 
 def rel(root: Path, path: Path) -> str:
@@ -38,24 +36,33 @@ def rel(root: Path, path: Path) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    path = file_path(path)
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
-def write_json(path: Path, data: dict[str, Any]) -> None:
+def write_bytes(path: Path, data: bytes) -> None:
+    """Replace one file atomically; retain the prior file on any pre-rename failure."""
+    path = file_path(path)
+    temp_path = file_path(path.with_name(f"{path.name}.{os.getpid()}.tmp"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Per-process temp name so concurrent writers never share a temp file.
-    temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    with temp_path.open("wb") as handle:
+        handle.write(data)
         handle.flush()
-        # ponytail: fsyncs the file, not the directory entry; add a dir fsync
-        # if power-loss durability of the rename itself ever matters.
         os.fsync(handle.fileno())
     temp_path.replace(path)
 
 
+def write_text(path: Path, text: str) -> None:
+    write_bytes(path, text.encode("utf-8"))
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
 def sha256_file(path: Path) -> str:
+    path = file_path(path)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -72,17 +79,10 @@ def parse_time(value: str) -> datetime:
 
 
 def read_pending_review_index(path: Path) -> dict[str, Any]:
+    path = file_path(path)
     if not path.exists():
         return _empty_pending_review_index()
-    try:
-        index = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return _empty_pending_review_index()
-    if index.get("schema") != PENDING_REVIEW_INDEX_SCHEMA:
-        return _empty_pending_review_index()
-    index.setdefault("reviews", [])
-    index.setdefault("latest", "")
-    return index
+    return read_validated(path, "pending_review_index")
 
 
 def _empty_pending_review_index() -> dict[str, Any]:
@@ -103,7 +103,8 @@ def _empty_pending_review_index() -> dict[str, Any]:
 
 def _key_file() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "looping-box" / "review.key"
+    # The operator-selected key base is an intentional external trust anchor.
+    return file_path(Path(base).resolve() / "looping-box" / "review.key")
 
 
 def _loose_permissions(path: Path) -> bool:
@@ -169,6 +170,30 @@ def sign_record(record: dict[str, Any], key: bytes) -> str:
     return hmac.new(key, json.dumps(body, sort_keys=True).encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def review_identity(items: list[dict[str, Any]]) -> str:
+    """Preserve the original review-ID serialization exactly."""
+    basis = json.dumps({"items": [
+        {"relative_path": item.get("relative_path"), "sha256": item.get("sha256"),
+         "review_reasons": item.get("review_reasons", [])} for item in items
+    ]}, sort_keys=True)
+    return "review-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def read_review_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = read_validated(path, "review_payload")
+        item = payload["source_items"][0]
+        if (payload["review_id"] != review_identity(payload["source_items"])
+                or path.name != payload["review_id"] + ".json"
+                or not item["review_reasons"] or payload["risk_reasons"] != item["review_reasons"]):
+            raise ValueError("identity or risk reasons do not agree")
+        return payload
+    except UnsafePathError as exc:
+        raise UnsafePathError(path, f"review_evidence_invalid: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"review_evidence_invalid: {path}: {exc}") from exc
+
+
 def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]:
     """Return (decision, unverifiable).
 
@@ -177,18 +202,23 @@ def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]
     key, edited, forged, or signed with another key) so callers can say why the
     gate is still closed. Rejections are checked first so a conflict fails safe.
     """
+    directory_path(staging_dir)
+    # Validate the ID before it becomes any part of a filename.
+    from .validation import REVIEW_ID
+    from .schema import validate
+    validate(review_id, REVIEW_ID, "$.review_id")
     key = review_key()
     present = False
     for directory, decision in (("rejections", "rejected"), ("approvals", "approved")):
-        path = staging_dir / directory / f"{review_id}.json"
+        path = file_path(staging_dir / directory / f"{review_id}.json")
         if not path.exists():
             continue
         present = True
         if key is None:
             continue
         try:
-            record = read_json(path)
-        except (OSError, json.JSONDecodeError):
+            record = read_validated(path, "review_record")
+        except (OSError, ValidationError):
             continue
         signature = record.get("signature") if isinstance(record, dict) else None
         if (
@@ -197,6 +227,27 @@ def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]
             and record.get("decision") == decision
             and hmac.compare_digest(signature, sign_record(record, key))
         ):
+            payload_path = file_path(staging_dir / "reviews" / f"{review_id}.json")
+            try:
+                payload = read_review_payload(payload_path)
+                if not hmac.compare_digest(record["payload_sha256"], sha256_file(payload_path)):
+                    continue
+                if decision == "approved":
+                    reference = record["verifier_result"]
+                    if (reference != f"cache/verifiers/{review_id}.json"
+                            or payload["verifier"]["status"] != "passed"
+                            or payload["verifier"]["result"] != reference):
+                        continue
+                    verifier = read_validated(resolve_under_root(staging_dir.parent, reference), "verifier_result")
+                    if (verifier["review_id"] != review_id or verifier["status"] != "passed"
+                            or not all(check["status"] == "passed" for check in verifier["checks"])):
+                        continue
+                elif record["verifier_result"] is not None:
+                    continue
+            except UnsafePathError:
+                raise
+            except (OSError, ValueError):
+                continue
             return decision, False
     return None, present
 
@@ -212,49 +263,76 @@ def decision_record_exists(staging_dir: Path, review_id: str) -> bool:
 # --- audit log (append-only, hash-chained) -----------------------------------
 
 
-def append_audit(root: Path, log: str, event: dict[str, Any]) -> None:
-    """Append one event to logs/transactions/<log>.jsonl, chained to the last one.
+@dataclass
+class AuditInspection:
+    events: list[dict[str, Any]]
+    broken_at: int | None = None
 
-    Each line carries `prev` (the previous line's `hash`) and its own `hash`, so
-    editing or deleting a middle line is detectable via verify_audit_chain.
+
+def audit_log_paths(root: Path) -> list[Path]:
+    directory = directory_path(resolve_under_root(root, "logs/transactions"))
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return []
+    return [file_path(path) for path in sorted(entries) if path.name.endswith(".jsonl")]
+
+
+def inspect_audit_log(path: Path) -> AuditInspection:
+    """Inspect the entire log; retain valid-shaped events and the first broken line.
+
+    A chain has no external anchor: full recomputation, suffix removal, or log
+    deletion cannot be detected. Empty/missing logs provide no activity evidence.
     """
-    path = resolve_under_root(root, f"logs/transactions/{log}.jsonl")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    prev = ""
-    if path.exists():
-        # ponytail: reads the whole log to find the tail; seek from the end if
-        # logs ever get large.
-        lines = path.read_text(encoding="utf-8").splitlines()
-        if lines:
-            with contextlib.suppress(ValueError, AttributeError):
-                prev = json.loads(lines[-1]).get("hash", "")
-    body = {"schema": AUDIT_EVENT_SCHEMA, **event, "prev": prev}
-    body["hash"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(body, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    path = file_path(path)
+    try:
+        lines = path.read_bytes().splitlines()
+    except FileNotFoundError:
+        return AuditInspection([])
+    result = AuditInspection([])
+    previous = ""
+    for number, line in enumerate(lines, 1):
+        try:
+            entry = validate_data(json.loads(line.decode("utf-8")), "audit_event", f"{path}:{number}")
+        except (ValueError, RecursionError):
+            if result.broken_at is None:
+                result.broken_at = number
+            continue
+        result.events.append(entry)
+        body = {name: value for name, value in entry.items() if name != "hash"}
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+        if entry["prev"] != previous or entry["hash"] != digest:
+            if result.broken_at is None:
+                result.broken_at = number
+        previous = entry["hash"]
+    return result
+
+
+def append_audit(root: Path, log: str, event: dict[str, Any]) -> None:
+    """Validate the entire existing chain, then append/flush/fsync under the lock."""
+    root = Path(root).resolve()
+    path = file_path(resolve_under_root(root, f"logs/transactions/{log}.jsonl"))
+    with project_lock(root, event.get("generated_at", utc_now())):
+        inspected = inspect_audit_log(path)
+        if inspected.broken_at is not None:
+            raise ValidationError(str(path), f"line {inspected.broken_at}: broken audit chain", code="audit_invalid")
+        previous = inspected.events[-1]["hash"] if inspected.events else ""
+        body = {"schema": AUDIT_EVENT_SCHEMA, **event, "prev": previous}
+        body.pop("hash", None)
+        body["hash"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+        validate_data(body, "audit_event", str(path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A valid last JSON record need not already have a terminating newline.
+        separator = "\n" if path.exists() and path.stat().st_size and not path.read_bytes().endswith(b"\n") else ""
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(separator + json.dumps(body, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def verify_audit_chain(path: Path) -> int | None:
-    """Return None if the chain is intact, else the 1-based line of the first break.
-
-    Lines written before chaining existed have no hash and report as a break.
-    """
-    prev = ""
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            return number
-        if not isinstance(entry, dict):
-            return number
-        claimed = entry.pop("hash", None)
-        recomputed = hashlib.sha256(json.dumps(entry, sort_keys=True).encode("utf-8")).hexdigest()
-        if entry.get("prev") != prev or claimed != recomputed:
-            return number
-        prev = claimed
-    return None
+    """Return None for intact/no evidence, else the first invalid one-based line."""
+    return inspect_audit_log(path).broken_at
 
 
 # --- project lock (shared by phase1, supervisor, and review) -----------------
@@ -273,45 +351,13 @@ def project_lock(
 
 
 def acquire_lock(lock_path: Path, generated_at: str, stale_lock_seconds: int) -> None:
-    try:
-        _write_lock_exclusive(lock_path, generated_at)
-        return
-    except FileExistsError:
-        pass
-
-    try:
-        lock = read_json(lock_path)
-        age = (parse_time(generated_at) - parse_time(lock["created_at"])).total_seconds()
-    except FileNotFoundError:
-        age = stale_lock_seconds + 1  # released between our two attempts
-    except (KeyError, ValueError, TypeError, AttributeError):
-        # Unreadable lock: age it by mtime so a corrupt file cannot wedge the loop.
-        try:
-            age = time.time() - lock_path.stat().st_mtime
-        except FileNotFoundError:
-            age = stale_lock_seconds + 1
-    if age <= stale_lock_seconds:
-        raise RuntimeError(f"active supervisor lock: {lock_path}")
-
-    lock_path.unlink(missing_ok=True)
-    try:
-        _write_lock_exclusive(lock_path, generated_at)
-    except FileExistsError as exc:
-        raise RuntimeError(f"active supervisor lock: {lock_path}") from exc
+    # Deprecated compatibility argument: timestamps never confer ownership.
+    _write_lock_exclusive(lock_path, generated_at)
 
 
 def _write_lock_exclusive(lock_path: Path, generated_at: str) -> None:
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("x", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps({"created_at": generated_at, "pid": os.getpid()}, sort_keys=True) + "\n"
-        )
+    locking.acquire(lock_path, generated_at)
 
 
 def release_lock(lock_path: Path, expected_pid: int) -> None:
-    try:
-        lock = read_json(lock_path)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return
-    if isinstance(lock, dict) and lock.get("pid") == expected_pid:
-        lock_path.unlink(missing_ok=True)
+    locking.release(lock_path, expected_pid)

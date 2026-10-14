@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import functools
-import json
 import re
 import unicodedata
 from pathlib import Path
 from typing import Any
 
 from ._util import resolve_under_root as _resolve_under_root
+from .validation import validate_data
+from .paths import read_validated
 
 DEFAULT_ACTION_CLASSES = {
     "default_class": "review_required",
@@ -128,7 +129,7 @@ def _keyword_pattern(keyword: str) -> re.Pattern[str] | None:
         base += (" " if required else " ?") + re.escape(after)
     forms = [base + r"(?:s|es|d|ed|ing)?"]
     if word.endswith("e"):
-        forms.append(re.escape(word[:-1]) + "ing")  # delete -> deleting
+        forms.append(base[:-1] + "ing")  # delete -> deleting
     if word[-1] in "tpdgn":
         forms.append(base + re.escape(word[-1]) + "(?:ed|ing)")  # commit -> committed
     # Word boundary on letters/digits only, and only where the keyword itself starts
@@ -144,7 +145,7 @@ def match_keywords(text: str, keywords: list[str]) -> list[str]:
     matches: list[str] = []
     for keyword in keywords:
         pattern = _keyword_pattern(str(keyword))
-        if pattern is not None and any(pattern.search(hay) for hay in haystacks):
+        if str(keyword) not in matches and pattern is not None and any(pattern.search(hay) for hay in haystacks):
             matches.append(str(keyword))
     return matches
 
@@ -175,13 +176,13 @@ def _classify(config: dict[str, Any], action: str) -> str:
 
 def _read_action_config(root: Path) -> dict[str, Any]:
     config = {
+        "schema": "looping-box.action-classes.v1",
         "default_class": DEFAULT_ACTION_CLASSES["default_class"],
         "classes": dict(DEFAULT_ACTION_CLASSES["classes"]),
     }
     config_path = _resolve_under_root(root, "config/action_classes.json")
     if config_path.exists():
-        with config_path.open("r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
+        loaded = read_validated(config_path, "action_classes")
         config["default_class"] = loaded.get("default_class", config["default_class"])
         config["classes"] = loaded.get("classes", config["classes"])
-    return config
+    return validate_data(config, "action_classes", str(config_path))
