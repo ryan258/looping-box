@@ -1,0 +1,50 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "message": {
+      "type": "string"
+    },
+    "reason": {
+      "enum": [
+        "file_count_limit",
+        "payload_size_limit",
+        "worker_timeout",
+        "routing_disabled"
+      ]
+    },
+    "schema": {
+      "const": "looping-box.supervisor.blocked.v1"
+    },
+    "source_deltas": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "generated_at",
+    "reason",
+    "message",
+    "source_deltas"
+  ],
+  "title": "supervisor_blocked",
+  "type": "object"
+}

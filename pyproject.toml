@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looping-box"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local, file-system-bounded automation loop that holds risky actions for human review."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.15"
 classifiers = [
   "Programming Language :: Python :: 3",
-  "Operating System :: OS Independent",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
   "Topic :: Software Development :: Quality Assurance",
 ]
 
@@ -28,7 +29,7 @@ looping-box-review = "looping_box.review:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-looping_box = ["templates/*", "templates/sops/*"]
+looping_box = ["templates/*", "templates/sops/*", "templates/schemas/*.json"]
 
 [tool.ruff]
 line-length = 110

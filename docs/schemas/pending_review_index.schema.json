@@ -1,11 +1,49 @@
 {
-  "title": "looping-box.pending-review-index.v1",
-  "type": "object",
-  "required": ["schema", "generated_at", "latest", "reviews"],
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
   "properties": {
-    "schema": {"const": "looping-box.pending-review-index.v1"},
-    "generated_at": {"type": "string"},
-    "latest": {"type": "string"},
-    "reviews": {"type": "array", "items": {"type": "string"}}
-  }
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "latest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Path"
+        },
+        {
+          "const": ""
+        }
+      ]
+    },
+    "reviews": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema": {
+      "const": "looping-box.pending-review-index.v1"
+    }
+  },
+  "required": [
+    "schema",
+    "generated_at",
+    "latest",
+    "reviews"
+  ],
+  "title": "pending_review_index",
+  "type": "object"
 }

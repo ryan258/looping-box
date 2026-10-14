@@ -1,0 +1,168 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Change": {
+      "additionalProperties": true,
+      "properties": {
+        "approved_review": {
+          "$ref": "#/$defs/ReviewID"
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "matched_routes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relative_path",
+        "sha256",
+        "size_bytes",
+        "matched_routes",
+        "review_reasons",
+        "excerpt"
+      ],
+      "type": "object"
+    },
+    "Class": {
+      "enum": [
+        "safe_local_transform",
+        "review_required",
+        "blocked",
+        "forbidden"
+      ],
+      "type": "string"
+    },
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "action_class": {
+      "$ref": "#/$defs/Class"
+    },
+    "generated_artifacts": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "notification_message": {
+      "type": "string"
+    },
+    "review_id": {
+      "$ref": "#/$defs/ReviewID"
+    },
+    "risk_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "looping-box.review-payload.v1"
+    },
+    "source": {
+      "const": "phase1"
+    },
+    "source_items": {
+      "items": {
+        "$ref": "#/$defs/Change"
+      },
+      "maxItems": 1,
+      "minItems": 1,
+      "type": "array"
+    },
+    "suggested_verification": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "verifier": {
+      "additionalProperties": true,
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "passed",
+            "failed",
+            "not_applicable"
+          ]
+        }
+      },
+      "required": [
+        "required",
+        "status",
+        "result"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema",
+    "review_id",
+    "generated_at",
+    "source",
+    "notification_message",
+    "action_class",
+    "risk_reasons",
+    "source_items",
+    "generated_artifacts",
+    "verifier",
+    "suggested_verification"
+  ],
+  "title": "review_payload",
+  "type": "object"
+}

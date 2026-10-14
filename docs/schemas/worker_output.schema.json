@@ -1,6 +1,134 @@
 {
-  "title": "looping-box.worker.output.v1",
-  "type": "object",
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Error": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "Status": {
+      "enum": [
+        "idle",
+        "complete",
+        "blocked",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    },
+    "WorkerID": {
+      "enum": [
+        "context_builder",
+        "execution_engine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/Error"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "inputs": {
+      "additionalProperties": true,
+      "properties": {
+        "source_deltas": {
+          "items": {
+            "$ref": "#/$defs/Path"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_deltas"
+      ],
+      "type": "object"
+    },
+    "outputs": {
+      "additionalProperties": true,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/Path"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "artifacts"
+      ],
+      "type": "object"
+    },
+    "planned_actions": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "enum": [
+              "quarantine",
+              "write",
+              "archive"
+            ]
+          },
+          "destination": {
+            "$ref": "#/$defs/Path"
+          },
+          "source": {
+            "$ref": "#/$defs/Path"
+          }
+        },
+        "required": [
+          "action",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "runtime_seconds": {
+      "minimum": 0,
+      "type": "number"
+    },
+    "schema": {
+      "const": "looping-box.worker.output.v1"
+    },
+    "status": {
+      "$ref": "#/$defs/Status"
+    },
+    "worker_id": {
+      "$ref": "#/$defs/WorkerID"
+    }
+  },
   "required": [
     "schema",
     "worker_id",
@@ -11,46 +139,6 @@
     "outputs",
     "errors"
   ],
-  "properties": {
-    "schema": {"const": "looping-box.worker.output.v1"},
-    "worker_id": {"type": "string"},
-    "run_id": {"type": "string"},
-    "generated_at": {"type": "string"},
-    "status": {
-      "enum": [
-        "idle",
-        "ready",
-        "running",
-        "blocked",
-        "failed",
-        "complete",
-        "pending_review"
-      ]
-    },
-    "inputs": {
-      "type": "object",
-      "required": ["source_deltas"],
-      "properties": {
-        "source_deltas": {"type": "array", "items": {"type": "string"}}
-      }
-    },
-    "outputs": {
-      "type": "object",
-      "required": ["artifacts"],
-      "properties": {
-        "artifacts": {"type": "array", "items": {"type": "string"}}
-      }
-    },
-    "errors": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["code", "message"],
-        "properties": {
-          "code": {"type": "string"},
-          "message": {"type": "string"}
-        }
-      }
-    }
-  }
+  "title": "worker_output",
+  "type": "object"
 }

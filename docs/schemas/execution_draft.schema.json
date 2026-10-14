@@ -1,0 +1,100 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "DraftItem": {
+      "additionalProperties": true,
+      "dependentRequired": {
+        "model": [
+          "response_sha256"
+        ],
+        "response_sha256": [
+          "model"
+        ]
+      },
+      "properties": {
+        "approved_review": {
+          "$ref": "#/$defs/ReviewID"
+        },
+        "draft": {
+          "type": "string"
+        },
+        "matched_routes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": "string"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "response_sha256": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "relative_path",
+        "matched_routes",
+        "draft"
+      ],
+      "type": "object"
+    },
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "held_for_review": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/DraftItem"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "looping-box.execution-draft.v1"
+    },
+    "source_context": {
+      "$ref": "#/$defs/Path"
+    },
+    "source_context_sha256": {
+      "$ref": "#/$defs/Hash"
+    }
+  },
+  "required": [
+    "schema",
+    "generated_at",
+    "source_context",
+    "source_context_sha256",
+    "items",
+    "held_for_review"
+  ],
+  "title": "execution_draft",
+  "type": "object"
+}

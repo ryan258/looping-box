@@ -1,0 +1,94 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "WorkerID": {
+      "enum": [
+        "context_builder",
+        "execution_engine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "dependencies": {
+      "items": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "const": "phase1_delta"
+              },
+              "to": {
+                "const": "context_builder"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "const": "context_builder"
+              },
+              "to": {
+                "const": "execution_engine"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "max_files_per_cycle": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_payload_bytes": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_worker_runtime_seconds": {
+      "exclusiveMinimum": 0,
+      "maximum": 1.7976931348623157e+308,
+      "type": "number"
+    },
+    "schema": {
+      "const": "looping-box.super-loop.config.v1"
+    },
+    "stale_lock_seconds": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "workers": {
+      "items": {
+        "$ref": "#/$defs/WorkerID"
+      },
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema",
+    "max_files_per_cycle",
+    "max_payload_bytes",
+    "max_worker_runtime_seconds",
+    "stale_lock_seconds",
+    "workers",
+    "dependencies"
+  ],
+  "title": "super_loop",
+  "type": "object"
+}

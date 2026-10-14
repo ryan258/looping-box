@@ -1,0 +1,167 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "DeltaSummary": {
+      "additionalProperties": true,
+      "properties": {
+        "changed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requires_review": {
+          "type": "boolean"
+        },
+        "scanned": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scanned",
+        "changed",
+        "skipped",
+        "requires_review"
+      ],
+      "type": "object"
+    },
+    "FirstSeen": {
+      "additionalProperties": true,
+      "properties": {
+        "first_seen_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "first_seen_path": {
+          "$ref": "#/$defs/Path"
+        }
+      },
+      "required": [
+        "first_seen_path",
+        "first_seen_at"
+      ],
+      "type": "object"
+    },
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "IngestionRun": {
+      "additionalProperties": true,
+      "properties": {
+        "delta_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generated_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "summary": {
+          "$ref": "#/$defs/DeltaSummary"
+        }
+      },
+      "required": [
+        "generated_at",
+        "delta_path",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "ProcessedFile": {
+      "additionalProperties": true,
+      "properties": {
+        "processed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sha256",
+        "size_bytes",
+        "processed_at"
+      ],
+      "type": "object"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "last_delta_path": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Path"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_run_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "present_paths": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    },
+    "processed_files": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ProcessedFile"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "object"
+    },
+    "processed_hashes": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FirstSeen"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/Hash"
+      },
+      "type": "object"
+    },
+    "runs": {
+      "items": {
+        "$ref": "#/$defs/IngestionRun"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "looping-box.phase1.state.v1"
+    }
+  },
+  "required": [
+    "schema",
+    "processed_files",
+    "processed_hashes",
+    "runs"
+  ],
+  "title": "phase1_state",
+  "type": "object"
+}

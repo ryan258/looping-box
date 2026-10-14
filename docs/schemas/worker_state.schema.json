@@ -1,0 +1,64 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    },
+    "WorkerID": {
+      "enum": [
+        "context_builder",
+        "execution_engine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "consumed_inputs": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    },
+    "last_context_sha256": {
+      "$ref": "#/$defs/Hash"
+    },
+    "last_model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_run_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "schema": {
+      "const": "looping-box.worker.state.v1"
+    },
+    "worker_id": {
+      "$ref": "#/$defs/WorkerID"
+    }
+  },
+  "required": [
+    "schema",
+    "worker_id",
+    "consumed_inputs"
+  ],
+  "title": "worker_state",
+  "type": "object"
+}

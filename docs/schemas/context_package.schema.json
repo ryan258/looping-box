@@ -1,0 +1,170 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "BlockedItem": {
+      "additionalProperties": true,
+      "properties": {
+        "approved_review": {
+          "$ref": "#/$defs/ReviewID"
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "matched_routes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pending_review_payload": {
+          "$ref": "#/$defs/Path"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        },
+        "source_delta": {
+          "$ref": "#/$defs/Path"
+        }
+      },
+      "required": [
+        "relative_path",
+        "sha256",
+        "matched_routes",
+        "excerpt",
+        "source_delta",
+        "review_reasons",
+        "pending_review_payload"
+      ],
+      "type": "object"
+    },
+    "ContextItem": {
+      "additionalProperties": true,
+      "properties": {
+        "approved_review": {
+          "$ref": "#/$defs/ReviewID"
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "matched_routes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        },
+        "source_delta": {
+          "$ref": "#/$defs/Path"
+        }
+      },
+      "required": [
+        "relative_path",
+        "sha256",
+        "matched_routes",
+        "excerpt",
+        "source_delta"
+      ],
+      "type": "object"
+    },
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "blocked_inputs": {
+      "items": {
+        "$ref": "#/$defs/BlockedItem"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ContextItem"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "looping-box.worker.context-package.v1"
+    },
+    "source_deltas": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "blocked"
+      ]
+    },
+    "synthesis": {
+      "additionalProperties": true,
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "response_sha256": {
+          "$ref": "#/$defs/Hash"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "model",
+        "response_sha256"
+      ],
+      "type": "object"
+    },
+    "worker_id": {
+      "const": "context_builder"
+    }
+  },
+  "required": [
+    "schema",
+    "worker_id",
+    "generated_at",
+    "status",
+    "source_deltas",
+    "items",
+    "blocked_inputs"
+  ],
+  "title": "context_package",
+  "type": "object"
+}

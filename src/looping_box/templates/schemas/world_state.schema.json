@@ -1,0 +1,233 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Edge": {
+      "oneOf": [
+        {
+          "additionalProperties": true,
+          "properties": {
+            "from": {
+              "const": "phase1_delta"
+            },
+            "to": {
+              "const": "context_builder"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": true,
+          "properties": {
+            "from": {
+              "const": "context_builder"
+            },
+            "to": {
+              "const": "execution_engine"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "Recovery": {
+      "additionalProperties": true,
+      "properties": {
+        "blocked_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operator_action_required": {
+          "type": "boolean"
+        },
+        "pending_review_payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "last_error",
+        "blocked_reason",
+        "pending_review_payload",
+        "operator_action_required"
+      ],
+      "type": "object"
+    },
+    "Status": {
+      "enum": [
+        "idle",
+        "complete",
+        "blocked",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "SupervisorRun": {
+      "additionalProperties": true,
+      "properties": {
+        "generated_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "plan": {
+          "items": {
+            "$ref": "#/$defs/WorkerID"
+          },
+          "type": "array"
+        },
+        "source_deltas": {
+          "items": {
+            "$ref": "#/$defs/Path"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        }
+      },
+      "required": [
+        "generated_at",
+        "status",
+        "plan",
+        "source_deltas"
+      ],
+      "type": "object"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    },
+    "WorkerID": {
+      "enum": [
+        "context_builder",
+        "execution_engine"
+      ],
+      "type": "string"
+    },
+    "WorkerSummary": {
+      "additionalProperties": true,
+      "properties": {
+        "last_output": {
+          "$ref": "#/$defs/Path"
+        },
+        "last_run_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        }
+      },
+      "required": [
+        "status",
+        "last_run_at",
+        "last_output"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "dependencies": {
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
+      "type": "array"
+    },
+    "dirty": {
+      "type": "boolean"
+    },
+    "last_run_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "leases": {
+      "type": "object"
+    },
+    "observed_deltas": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array"
+    },
+    "recovery": {
+      "$ref": "#/$defs/Recovery"
+    },
+    "registered_loops": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "runs": {
+      "items": {
+        "$ref": "#/$defs/SupervisorRun"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "looping-box.world-state.v1"
+    },
+    "worker_states": {
+      "additionalProperties": {
+        "$ref": "#/$defs/WorkerSummary"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/WorkerID"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema",
+    "registered_loops",
+    "worker_states",
+    "observed_deltas",
+    "dirty",
+    "dependencies",
+    "recovery",
+    "runs",
+    "leases"
+  ],
+  "title": "world_state",
+  "type": "object"
+}

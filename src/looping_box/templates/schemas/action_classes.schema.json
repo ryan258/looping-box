@@ -1,0 +1,63 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "classes": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked": {
+          "items": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "forbidden": {
+          "items": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "review_required": {
+          "items": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "safe_local_transform": {
+          "items": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "default_class": {
+      "enum": [
+        "review_required",
+        "blocked",
+        "forbidden"
+      ]
+    },
+    "schema": {
+      "const": "looping-box.action-classes.v1"
+    }
+  },
+  "required": [
+    "schema",
+    "default_class",
+    "classes"
+  ],
+  "title": "action_classes",
+  "type": "object"
+}

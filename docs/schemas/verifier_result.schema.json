@@ -1,23 +1,69 @@
 {
-  "title": "looping-box.verifier-result.v1",
-  "type": "object",
-  "required": ["schema", "review_id", "generated_at", "status", "checks"],
-  "properties": {
-    "schema": {"const": "looping-box.verifier-result.v1"},
-    "review_id": {"type": "string"},
-    "generated_at": {"type": "string"},
-    "status": {"enum": ["passed", "failed"]},
-    "checks": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["name", "status", "message"],
-        "properties": {
-          "name": {"type": "string"},
-          "status": {"enum": ["passed", "failed"]},
-          "message": {"type": "string"}
-        }
-      }
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "checks": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "message"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "review_id": {
+      "$ref": "#/$defs/ReviewID"
+    },
+    "schema": {
+      "const": "looping-box.verifier-result.v1"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "review_id",
+    "generated_at",
+    "status",
+    "checks"
+  ],
+  "title": "verifier_result",
+  "type": "object"
 }

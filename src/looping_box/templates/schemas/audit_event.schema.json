@@ -1,0 +1,274 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Status": {
+      "enum": [
+        "idle",
+        "complete",
+        "blocked",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    },
+    "WorkerID": {
+      "enum": [
+        "context_builder",
+        "execution_engine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "phase1.run"
+          }
+        }
+      },
+      "then": {
+        "additionalProperties": true,
+        "properties": {
+          "changed": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "gate": {
+            "enum": [
+              "clear",
+              "pending_review"
+            ]
+          },
+          "released_review_ids": {
+            "items": {
+              "$ref": "#/$defs/ReviewID"
+            },
+            "type": "array"
+          },
+          "review_ids": {
+            "items": {
+              "$ref": "#/$defs/ReviewID"
+            },
+            "type": "array"
+          },
+          "run_id": {
+            "pattern": "^phase1-delta-[A-Za-z0-9]+(?:-(?:[2-9]|[1-9][0-9]+))?(?![\\s\\S])",
+            "type": "string"
+          },
+          "skipped": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "changed",
+          "skipped",
+          "gate",
+          "review_ids",
+          "released_review_ids",
+          "warnings"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "supervisor.run"
+          }
+        }
+      },
+      "then": {
+        "additionalProperties": true,
+        "properties": {
+          "blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan": {
+            "items": {
+              "$ref": "#/$defs/WorkerID"
+            },
+            "type": "array"
+          },
+          "source_deltas": {
+            "items": {
+              "$ref": "#/$defs/Path"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/$defs/Status"
+          },
+          "worker_statuses": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Status"
+            },
+            "propertyNames": {
+              "$ref": "#/$defs/WorkerID"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "status",
+          "plan",
+          "source_deltas",
+          "worker_statuses",
+          "blocked_reason"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "review.approved"
+          }
+        }
+      },
+      "then": {
+        "additionalProperties": true,
+        "properties": {
+          "approver": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "interactive": {
+            "type": "boolean"
+          },
+          "note": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "payload_sha256": {
+            "$ref": "#/$defs/Hash"
+          },
+          "review_id": {
+            "$ref": "#/$defs/ReviewID"
+          }
+        },
+        "required": [
+          "review_id",
+          "approver",
+          "interactive",
+          "note",
+          "payload_sha256"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "review.rejected"
+          }
+        }
+      },
+      "then": {
+        "additionalProperties": true,
+        "properties": {
+          "approver": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "interactive": {
+            "type": "boolean"
+          },
+          "note": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "payload_sha256": {
+            "$ref": "#/$defs/Hash"
+          },
+          "review_id": {
+            "$ref": "#/$defs/ReviewID"
+          }
+        },
+        "required": [
+          "review_id",
+          "approver",
+          "interactive",
+          "note",
+          "payload_sha256"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "properties": {
+    "event": {
+      "enum": [
+        "phase1.run",
+        "supervisor.run",
+        "review.approved",
+        "review.rejected"
+      ]
+    },
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "hash": {
+      "$ref": "#/$defs/Hash"
+    },
+    "prev": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Hash"
+        },
+        {
+          "const": ""
+        }
+      ]
+    },
+    "schema": {
+      "const": "looping-box.audit-event.v1"
+    }
+  },
+  "required": [
+    "schema",
+    "generated_at",
+    "prev",
+    "hash",
+    "event"
+  ],
+  "title": "audit_event",
+  "type": "object"
+}

@@ -1,6 +1,292 @@
 {
-  "title": "looping-box.phase1.delta.v1",
-  "type": "object",
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$defs": {
+    "Change": {
+      "additionalProperties": true,
+      "properties": {
+        "approved_review": {
+          "$ref": "#/$defs/ReviewID"
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "matched_routes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relative_path",
+        "sha256",
+        "size_bytes",
+        "matched_routes",
+        "review_reasons",
+        "excerpt"
+      ],
+      "type": "object"
+    },
+    "DeltaSummary": {
+      "additionalProperties": true,
+      "properties": {
+        "changed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requires_review": {
+          "type": "boolean"
+        },
+        "scanned": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scanned",
+        "changed",
+        "skipped",
+        "requires_review"
+      ],
+      "type": "object"
+    },
+    "Gate": {
+      "additionalProperties": true,
+      "if": {
+        "properties": {
+          "status": {
+            "const": "clear"
+          }
+        }
+      },
+      "properties": {
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "clear",
+            "pending_review"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "payload",
+        "reasons"
+      ],
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "null"
+          },
+          "reasons": {
+            "maxItems": 0
+          }
+        }
+      },
+      "type": "object"
+    },
+    "Hash": {
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Path": {
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\u0000-\\u001f]+(?:/[^/\\u0000-\\u001f]+)*(?![\\s\\S])",
+      "type": "string"
+    },
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Skip": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "enum": [
+            "already_processed",
+            "review_decision_recorded"
+          ]
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "relative_path",
+        "sha256",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
+      "type": "string"
+    },
+    "Warning": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/Path"
+        },
+        "review_id": {
+          "$ref": "#/$defs/ReviewID"
+        }
+      },
+      "required": [
+        "code",
+        "review_id",
+        "relative_path",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "boundary_gate": {
+      "$ref": "#/$defs/Gate"
+    },
+    "changes": {
+      "items": {
+        "$ref": "#/$defs/Change"
+      },
+      "type": "array"
+    },
+    "delta_path": {
+      "$ref": "#/$defs/Path"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "inputs": {
+      "additionalProperties": true,
+      "properties": {
+        "input_dir": {
+          "$ref": "#/$defs/Path"
+        },
+        "root": {
+          "pattern": "^/",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "input_dir"
+      ],
+      "type": "object"
+    },
+    "reconciliation": {
+      "additionalProperties": true,
+      "properties": {
+        "removed_paths": {
+          "items": {
+            "$ref": "#/$defs/Path"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scanned_paths": {
+          "items": {
+            "$ref": "#/$defs/Path"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "scanned_paths",
+        "removed_paths"
+      ],
+      "type": "object"
+    },
+    "run_id": {
+      "pattern": "^phase1-delta-[A-Za-z0-9]+(?:-(?:[2-9]|[1-9][0-9]+))?(?![\\s\\S])",
+      "type": "string"
+    },
+    "schema": {
+      "const": "looping-box.phase1.delta.v1"
+    },
+    "skipped": {
+      "items": {
+        "$ref": "#/$defs/Skip"
+      },
+      "type": "array"
+    },
+    "sop": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/Path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "name"
+      ],
+      "type": "object"
+    },
+    "summary": {
+      "$ref": "#/$defs/DeltaSummary"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
   "required": [
     "schema",
     "run_id",
@@ -13,94 +299,6 @@
     "boundary_gate",
     "delta_path"
   ],
-  "properties": {
-    "schema": {"const": "looping-box.phase1.delta.v1"},
-    "run_id": {"type": "string"},
-    "generated_at": {"type": "string"},
-    "delta_path": {"type": "string"},
-    "sop": {
-      "type": "object",
-      "required": ["path", "sha256", "name"],
-      "properties": {
-        "path": {"type": "string"},
-        "sha256": {"type": "string"},
-        "name": {"type": "string"}
-      }
-    },
-    "inputs": {
-      "type": "object",
-      "required": ["root", "input_dir"],
-      "properties": {
-        "root": {"type": "string"},
-        "input_dir": {"type": "string"}
-      }
-    },
-    "summary": {
-      "type": "object",
-      "required": ["scanned", "changed", "skipped", "requires_review"],
-      "properties": {
-        "scanned": {"type": "integer"},
-        "changed": {"type": "integer"},
-        "skipped": {"type": "integer"},
-        "requires_review": {"type": "boolean"}
-      }
-    },
-    "changes": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": [
-          "relative_path",
-          "sha256",
-          "size_bytes",
-          "matched_routes",
-          "review_reasons",
-          "excerpt"
-        ],
-        "properties": {
-          "relative_path": {"type": "string"},
-          "sha256": {"type": "string"},
-          "size_bytes": {"type": "integer"},
-          "matched_routes": {"type": "array", "items": {"type": "string"}},
-          "review_reasons": {"type": "array", "items": {"type": "string"}},
-          "excerpt": {"type": "string"},
-          "approved_review": {"type": "string"}
-        }
-      }
-    },
-    "skipped": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["relative_path", "sha256", "reason"],
-        "properties": {
-          "relative_path": {"type": "string"},
-          "sha256": {"type": "string"},
-          "reason": {"type": "string"}
-        }
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["code", "review_id", "relative_path", "message"],
-        "properties": {
-          "code": {"type": "string"},
-          "review_id": {"type": "string"},
-          "relative_path": {"type": "string"},
-          "message": {"type": "string"}
-        }
-      }
-    },
-    "boundary_gate": {
-      "type": "object",
-      "required": ["status", "reasons"],
-      "properties": {
-        "status": {"enum": ["clear", "pending_review"]},
-        "payload": {"type": ["string", "null"]},
-        "reasons": {"type": "array", "items": {"type": "string"}}
-      }
-    }
-  }
+  "title": "phase1_delta",
+  "type": "object"
 }

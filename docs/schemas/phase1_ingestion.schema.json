@@ -1,0 +1,81 @@
+{
+  "$comment": "Runtime also checks cross-field relationships: pending latest/last, disjoint reconciliation, unique config labels/terms and consistent workers/edges; policy coverage is checked across configs. Numbers are finite; integer fields exclude booleans. Paths are lexical; filesystem checks are separate.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "allowed_extensions": {
+      "items": {
+        "pattern": "^\\..+$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "boundary_gate": {
+      "additionalProperties": false,
+      "properties": {
+        "notification_message": {
+          "type": "string"
+        },
+        "requires_review_keywords": {
+          "items": {
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "requires_review_keywords",
+        "notification_message"
+      ],
+      "type": "object"
+    },
+    "max_excerpt_chars": {
+      "minimum": 3,
+      "type": "integer"
+    },
+    "max_file_bytes": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "name": {
+      "type": "string"
+    },
+    "routes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "keywords": {
+            "items": {
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "label": {
+            "pattern": "\\S",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "keywords"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "name",
+    "allowed_extensions",
+    "routes",
+    "boundary_gate",
+    "max_excerpt_chars",
+    "max_file_bytes"
+  ],
+  "title": "phase1_ingestion",
+  "type": "object"
+}
