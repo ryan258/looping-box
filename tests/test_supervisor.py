@@ -1,4 +1,5 @@
 import json
+import fcntl
 import os
 import sys
 import tempfile
@@ -13,7 +14,8 @@ from looping_box.phase1 import run_phase1
 from looping_box.schema import validate
 from looping_box._util import release_lock as _release_lock
 from looping_box.supervisor import load_world_state, run_supervisor, status_summary
-from looping_box import supervisor
+from looping_box import supervisor, scaffold, locking
+from looping_box._util import acquire_lock
 
 SCHEMA_DIR = ROOT / "docs" / "schemas"
 WORLD_STATE_SCHEMA = json.loads((SCHEMA_DIR / "world_state.schema.json").read_text())
@@ -33,6 +35,7 @@ def _make_sop(root: Path) -> None:
                     "notification_message": "Review required",
                 },
                 "max_excerpt_chars": 120,
+                "max_file_bytes": 65536,
             }
         ),
         encoding="utf-8",
@@ -40,6 +43,17 @@ def _make_sop(root: Path) -> None:
 
 
 class SupervisorTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        env = patch.dict(os.environ, {"XDG_CONFIG_HOME": temp.name,
+                                     "LOOPING_BOX_REVIEW_KEY": "fixture-review-key"}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        transport = patch("looping_box.model._transport", side_effect=AssertionError("live provider forbidden"))
+        transport.start()
+        self.addCleanup(transport.stop)
+
     def test_supervisor_runs_worker_chain_once_then_noops(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -107,45 +121,40 @@ class SupervisorTests(unittest.TestCase):
                 load_world_state(root)
 
     def test_active_lock_blocks_and_stale_lock_is_recovered(self):
+        # Legacy test name retained: T03 replaces timestamp recovery with flock.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _make_sop(root)
+            root = Path(tmp).resolve()
+            scaffold.init_workspace(root)
             lock_path = root / ".looping_box.lock"
-            lock_path.write_text(
-                json.dumps({"created_at": "2026-06-24T12:00:00Z", "pid": 999}) + "\n",
-                encoding="utf-8",
-            )
-
-            with self.assertRaises(RuntimeError):
-                run_supervisor(root, now="2026-06-24T12:00:01Z")
-
-            lock_path.write_text(
-                json.dumps({"created_at": "2026-06-24T11:00:00Z", "pid": 999}) + "\n",
-                encoding="utf-8",
-            )
+            inode = lock_path.stat().st_ino
+            with lock_path.open("r+") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                handle.seek(0)
+                handle.truncate()
+                handle.write(json.dumps({"created_at": "1900-01-01T00:00:00Z", "pid": 999}))
+                handle.flush()
+                with self.assertRaisesRegex(RuntimeError, "busy"):
+                    run_supervisor(root, now="2026-06-24T12:00:01Z")
             result = run_supervisor(root, now="2026-06-24T12:00:01Z")
             self.assertEqual(result["status"], "idle")
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.stat().st_ino, inode)
 
     def test_release_lock_only_removes_current_process_lock(self):
+        # Release no longer removes any file, and metadata cannot grant ownership.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            lock_path = root / ".looping_box.lock"
-            lock_path.write_text(
-                json.dumps({"created_at": "2026-06-24T12:00:00Z", "pid": os.getpid() + 1}) + "\n",
-                encoding="utf-8",
-            )
-
+            lock_path = Path(tmp).resolve() / ".looping_box.lock"
+            lock_path.write_text(json.dumps({"pid": os.getpid()}))
+            before = lock_path.read_bytes()
             _release_lock(lock_path, os.getpid())
-
-            self.assertTrue(lock_path.exists())
-
-            lock_path.write_text(
-                json.dumps({"created_at": "2026-06-24T12:00:00Z", "pid": os.getpid()}) + "\n",
-                encoding="utf-8",
-            )
-            _release_lock(lock_path, os.getpid())
-            self.assertFalse(lock_path.exists())
+            self.assertEqual(lock_path.read_bytes(), before)
+            acquire_lock(lock_path, "2026-06-24T12:00:00Z", 300)
+            try:
+                _release_lock(lock_path, os.getpid() + 1)
+                self.assertTrue(locking.is_held(lock_path))
+            finally:
+                _release_lock(lock_path, os.getpid())
+            self.assertFalse(locking.is_held(lock_path))
+            self.assertTrue(lock_path.is_file())
 
     def test_supervisor_cli_requires_once_or_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,6 +177,7 @@ class SupervisorTests(unittest.TestCase):
             (root / "config" / "super_loop.json").write_text(
                 json.dumps(
                     {
+                        **supervisor.DEFAULT_CONFIG,
                         "workers": ["context_builder", "execution_engine"],
                         "dependencies": [{"from": "phase1_delta", "to": "context_builder"}],
                     }
@@ -190,7 +200,7 @@ class SupervisorTests(unittest.TestCase):
             _make_sop(root)
             (root / "config").mkdir(exist_ok=True)
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_files_per_cycle": 1}) + "\n",
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_files_per_cycle": 1}) + "\n",
                 encoding="utf-8",
             )
             (root / "inbox" / "a.md").write_text("docs a", encoding="utf-8")
@@ -211,7 +221,7 @@ class SupervisorTests(unittest.TestCase):
             root = Path(tmp)
             _make_sop(root)
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_payload_bytes": 1}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_payload_bytes": 1}) + "\n", encoding="utf-8"
             )
             (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
@@ -225,7 +235,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(second["recovery"]["blocked_reason"], "payload_size_limit")
 
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_payload_bytes": 65536}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_payload_bytes": 65536}) + "\n", encoding="utf-8"
             )
             third = run_supervisor(root, now="2026-06-24T12:03:00Z")
             self.assertEqual(third["status"], "complete")
@@ -238,7 +248,7 @@ class SupervisorTests(unittest.TestCase):
             root = Path(tmp)
             _make_sop(root)
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_payload_bytes": 1}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_payload_bytes": 1}) + "\n", encoding="utf-8"
             )
             (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
@@ -256,7 +266,7 @@ class SupervisorTests(unittest.TestCase):
             root = Path(tmp)
             _make_sop(root)
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_payload_bytes": 1}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_payload_bytes": 1}) + "\n", encoding="utf-8"
             )
             (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
@@ -277,21 +287,23 @@ class SupervisorTests(unittest.TestCase):
             root = Path(tmp)
             _make_sop(root)
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_worker_runtime_seconds": -1}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_worker_runtime_seconds": 1}) + "\n", encoding="utf-8"
             )
             (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
 
-            first = run_supervisor(root, now="2026-06-24T12:01:00Z")
+            with patch.object(supervisor.time, "monotonic", side_effect=[0, 2]):
+                first = run_supervisor(root, now="2026-06-24T12:01:00Z")
             self.assertEqual(first["status"], "blocked")
             self.assertEqual(first["recovery"]["blocked_reason"], "worker_timeout")
 
-            second = run_supervisor(root, now="2026-06-24T12:02:00Z")
+            with patch.object(supervisor.time, "monotonic", side_effect=[0, 2]):
+                second = run_supervisor(root, now="2026-06-24T12:02:00Z")
             self.assertEqual(second["status"], "blocked")
             self.assertEqual(second["recovery"]["blocked_reason"], "worker_timeout")
 
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_worker_runtime_seconds": 30}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_worker_runtime_seconds": 30}) + "\n", encoding="utf-8"
             )
             third = run_supervisor(root, now="2026-06-24T12:03:00Z")
             self.assertEqual(third["status"], "complete")

@@ -1,16 +1,15 @@
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-
-# Decision records are HMAC-signed; tests must never touch ~/.config.
-os.environ["LOOPING_BOX_REVIEW_KEY"] = "test-review-key"
 
 from looping_box import cli
 from looping_box.doctor import run_doctor
@@ -18,6 +17,17 @@ from looping_box.scaffold import TEMPLATES, init_workspace, template_text
 
 
 class ScaffoldTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        env = patch.dict(os.environ, {"XDG_CONFIG_HOME": temp.name,
+                                     "LOOPING_BOX_REVIEW_KEY": "fixture-review-key"}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        transport = patch("looping_box.model._transport", side_effect=AssertionError("live provider forbidden"))
+        transport.start()
+        self.addCleanup(transport.stop)
+
     def test_init_creates_a_workspace_that_is_healthy_and_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -39,12 +49,15 @@ class ScaffoldTests(unittest.TestCase):
             root = Path(tmp)
             init_workspace(root)
             custom = root / "config" / "super_loop.json"
-            custom.write_text('{"max_files_per_cycle": 3}\n')
+            config = json.loads(custom.read_text())
+            config["max_files_per_cycle"] = 3
+            expected = json.dumps(config) + "\n"
+            custom.write_text(expected)
 
             results = init_workspace(root)
 
             self.assertTrue(all(status == "kept" for status, _ in results))
-            self.assertEqual(custom.read_text(), '{"max_files_per_cycle": 3}\n')
+            self.assertEqual(custom.read_text(), expected)
 
     def test_bundled_templates_match_this_repos_own_config(self):
         # The repo's config/ is a workspace instance; the package templates are the

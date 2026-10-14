@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _ENV_VARS = (
     "OPENROUTER_API_KEY",
@@ -37,6 +38,10 @@ class ModelLayerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        env = patch.dict(os.environ, {"LOOPING_BOX_REVIEW_KEY": "fake-model-review-key",
+                                      "XDG_CONFIG_HOME": str(self.root / "keys")}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
         # Each test loads .env fresh and restores the transport.
         model._env_loaded_for.clear()
         for key in _ENV_VARS:
@@ -74,6 +79,8 @@ class ModelLayerTests(unittest.TestCase):
             json.dumps(
                 {
                     "name": "t",
+                    "max_excerpt_chars": 500,
+                    "max_file_bytes": 1_000_000,
                     "allowed_extensions": [".txt"],
                     "routes": [{"label": "docs", "keywords": ["docs"]}],
                     "boundary_gate": {"requires_review_keywords": [], "notification_message": "x"},
@@ -125,6 +132,8 @@ class ModelLayerTests(unittest.TestCase):
             json.dumps(
                 {
                     "name": "t",
+                    "max_excerpt_chars": 500,
+                    "max_file_bytes": 1_000_000,
                     "allowed_extensions": [".txt"],
                     "routes": [{"label": "docs", "keywords": ["docs"]}],
                     "boundary_gate": {"requires_review_keywords": [], "notification_message": "x"},
@@ -176,6 +185,8 @@ class ModelLayerTests(unittest.TestCase):
             json.dumps(
                 {
                     "name": "t",
+                    "max_excerpt_chars": 500,
+                    "max_file_bytes": 1_000_000,
                     "allowed_extensions": [".txt"],
                     "routes": [{"label": "docs", "keywords": ["docs"]}],
                     "boundary_gate": {"requires_review_keywords": ["deploy"], "notification_message": "x"},
@@ -203,6 +214,8 @@ class ModelLayerTests(unittest.TestCase):
             json.dumps(
                 {
                     "name": "t",
+                    "max_excerpt_chars": 500,
+                    "max_file_bytes": 1_000_000,
                     "allowed_extensions": [".txt"],
                     "routes": [{"label": "docs", "keywords": ["docs"]}],
                     "boundary_gate": {"requires_review_keywords": [], "notification_message": "x"},
@@ -231,6 +244,8 @@ class ModelLayerTests(unittest.TestCase):
             json.dumps(
                 {
                     "name": "t",
+                    "max_excerpt_chars": 500,
+                    "max_file_bytes": 1_000_000,
                     "allowed_extensions": [".txt"],
                     "routes": [{"label": "docs", "keywords": ["docs"]}],
                     "boundary_gate": {"requires_review_keywords": [], "notification_message": "x"},
@@ -294,6 +309,8 @@ class ModelLayerTests(unittest.TestCase):
             json.dumps(
                 {
                     "name": "t",
+                    "max_excerpt_chars": 500,
+                    "max_file_bytes": 1_000_000,
                     "allowed_extensions": [".txt"],
                     "routes": [],
                     "boundary_gate": {"requires_review_keywords": ["deploy"], "notification_message": "x"},
@@ -315,6 +332,11 @@ class ModelLayerTests(unittest.TestCase):
         result = run_verifier(self.root, review_id, now="2026-06-24T12:00:05Z")
         self.assertEqual(result["status"], "failed")  # fail closed, not silently pass
         self.assertTrue(any(c["name"] == "model_review" and c["status"] == "failed" for c in result["checks"]))
+
+
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":

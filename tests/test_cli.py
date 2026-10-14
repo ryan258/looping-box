@@ -7,12 +7,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-
-# Decision records are HMAC-signed; tests must never touch ~/.config.
-os.environ["LOOPING_BOX_REVIEW_KEY"] = "test-review-key"
 
 from looping_box import cli
 from looping_box._util import append_audit
@@ -33,7 +31,20 @@ def _run(*argv: str) -> tuple[int, str]:
     return code, buffer.getvalue()
 
 
-class CliTests(unittest.TestCase):
+class _IsolatedCliTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        env = patch.dict(os.environ, {"XDG_CONFIG_HOME": temp.name,
+                                     "LOOPING_BOX_REVIEW_KEY": "fixture-key"}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        transport = patch("looping_box.model._transport", side_effect=AssertionError("live provider forbidden"))
+        transport.start()
+        self.addCleanup(transport.stop)
+
+
+class CliTests(_IsolatedCliTest):
     def test_run_then_status_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _workspace(tmp)
@@ -54,7 +65,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(_run("--help")[0], 0)
 
 
-class DoctorTests(unittest.TestCase):
+class DoctorTests(_IsolatedCliTest):
     def _levels(self, root: Path):
         return [(level, message) for level, message, _ in run_doctor(root)]
 
@@ -66,26 +77,28 @@ class DoctorTests(unittest.TestCase):
     def test_flags_stale_lock_missing_action_class_and_pending_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _workspace(tmp)
+            (root / "inbox" / "r.txt").write_text("please deploy the release")
+            _run("phase1", "--root", str(root))
             (root / "config" / "action_classes.json").write_text(
                 json.dumps({"schema": "looping-box.action-classes.v1", "default_class": "review_required", "classes": {}})
             )
-            (root / "inbox" / "r.txt").write_text("please deploy the release")
-            _run("phase1", "--root", str(root))  # leaves one pending review behind
             (root / ".looping_box.lock").write_text(
                 json.dumps({"created_at": "2020-01-01T00:00:00Z", "pid": 1}) + "\n"
             )
 
-            warnings = [m for level, m in self._levels(root) if level == "warn"]
-
-            self.assertTrue(any("stale lock" in m for m in warnings))
-            self.assertTrue(any("no explicit action class" in m for m in warnings))
-            self.assertTrue(any("pending review" in m for m in warnings))
+            findings = self._levels(root)
+            # T03/T09: age cannot establish kernel ownership; invalid config fails.
+            self.assertIn(("ok", "no lock held"), findings)
+            self.assertTrue(any(level == "fail" and "no explicit action class" in m for level, m in findings))
+            self.assertTrue(any(level == "warn" and "pending review" in m for level, m in findings))
 
     def test_broken_audit_chain_is_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _workspace(tmp)
-            append_audit(root, "phase1", {"event": "a"})
-            append_audit(root, "phase1", {"event": "b"})
+            event = {"event": "phase1.run", "generated_at": "2026-10-03T12:00:00Z", "run_id": "phase1-delta-20261003T120000Z",
+                     "changed": 1, "skipped": 0, "gate": "clear", "review_ids": [], "released_review_ids": [], "warnings": []}
+            append_audit(root, "phase1", event)
+            append_audit(root, "phase1", event)
             log = root / "logs" / "transactions" / "phase1.jsonl"
             lines = [json.loads(line) for line in log.read_text().splitlines()]
             lines[0]["event"] = "tampered"

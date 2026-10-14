@@ -1,6 +1,7 @@
 """Regression tests for the trust-boundary fixes (gate matching, signed decisions,
 approval release, retry after model failure, status truth, audit chain, locks)."""
 
+import fcntl
 import json
 import os
 import sys
@@ -11,8 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-# Decision records are HMAC-signed; tests must never touch ~/.config.
-os.environ["LOOPING_BOX_REVIEW_KEY"] = "test-review-key"
 
 from looping_box import model
 from looping_box._util import append_audit, verify_audit_chain
@@ -34,6 +33,7 @@ def _make_sop(root: Path, **extra) -> None:
         "routes": [{"label": "docs", "keywords": ["docs"]}],
         "boundary_gate": {"requires_review_keywords": ["deploy", "production"], "notification_message": "x"},
         "max_excerpt_chars": 120,
+        "max_file_bytes": 1000000,
     }
     sop.update(extra)
     (root / "config" / "sops" / "phase1_ingestion.json").write_text(json.dumps(sop), encoding="utf-8")
@@ -289,7 +289,7 @@ class PipelineTests(unittest.TestCase):
             retried = run_supervisor(root, now="2026-06-24T12:02:00Z")
 
             self.assertEqual(retried["status"], "complete")
-            self.assertEqual(retried["plan"], ["context_builder", "execution_engine"])
+            self.assertEqual(retried["plan"], ["execution_engine"])
             draft = json.loads((root / "cache" / "workers" / "execution_engine" / "draft.json").read_text())
             self.assertEqual(draft["items"][0]["draft"], "MODEL DRAFT")
             self.assertIn("clear", status_summary(root))
@@ -336,13 +336,17 @@ class ModelAndLockTests(unittest.TestCase):
             _make_sop(root)
             lock = root / ".looping_box.lock"
             lock.write_text(json.dumps({"created_at": "2026-06-24T12:00:00Z", "pid": 1}) + "\n")
-            with self.assertRaises(RuntimeError):
-                run_phase1(root, now="2026-06-24T12:00:01Z")
+            inode = lock.stat().st_ino
+            with lock.open("r+") as owner:
+                fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(RuntimeError, "busy"):
+                    run_phase1(root, now="2026-06-24T12:00:01Z")
 
             lock.write_text("not json", encoding="utf-8")
-            os.utime(lock, (0, 0))  # ancient mtime => stale
+            os.utime(lock, (0, 0))  # diagnostics do not establish ownership
             run_phase1(root, now="2026-06-24T12:00:02Z")
-            self.assertFalse(lock.exists())
+            self.assertTrue(lock.exists())
+            self.assertEqual(lock.stat().st_ino, inode)
 
 
 class AuditTests(unittest.TestCase):
@@ -382,8 +386,13 @@ class AuditTests(unittest.TestCase):
             event = json.loads(log.read_text().splitlines()[0])
             self.assertEqual((event["approver"], event["note"]), ("ryan", "not now"))
             self.assertIsNone(verify_audit_chain(log))
-            append_audit(root.resolve(), "review", {"event": "x"})  # resolved: macOS /var -> /private/var
+            append_audit(root.resolve(), "review", {k: v for k, v in event.items() if k not in {"hash", "prev_hash"}})
             self.assertIsNone(verify_audit_chain(log))
+
+
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":

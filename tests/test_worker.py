@@ -1,8 +1,10 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -25,6 +27,7 @@ def _make_sop(root: Path) -> None:
                     "notification_message": "Review required",
                 },
                 "max_excerpt_chars": 120,
+                "max_file_bytes": 1_000_000,
             }
         ),
         encoding="utf-8",
@@ -32,6 +35,14 @@ def _make_sop(root: Path) -> None:
 
 
 class WorkerTests(unittest.TestCase):
+    def setUp(self):
+        keys = tempfile.TemporaryDirectory()
+        self.addCleanup(keys.cleanup)
+        env = patch.dict(os.environ, {"LOOPING_BOX_REVIEW_KEY": "fake-worker-key",
+                                      "XDG_CONFIG_HOME": keys.name}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_context_builder_consumes_new_phase1_delta_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -100,7 +111,6 @@ class WorkerTests(unittest.TestCase):
             (root / "inbox" / "notes.md").write_text("docs note", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
             run_worker(root, "context_builder", now="2026-06-24T12:01:00Z")
-            (root / "inbox" / "notes.md").unlink()
 
             result = run_worker(root, "execution_engine", now="2026-06-24T12:02:00Z")
 
@@ -109,8 +119,20 @@ class WorkerTests(unittest.TestCase):
             draft = json.loads(draft_path.read_text(encoding="utf-8"))
             self.assertEqual(draft["schema"], "looping-box.execution-draft.v1")
             self.assertEqual(draft["items"][0]["relative_path"], "inbox/notes.md")
+            self.assertEqual(draft["items"][0]["draft"], "docs note")
             self.assertEqual(draft["source_context"], "cache/workers/context_builder/context_package.json")
             self.assertTrue(draft["source_context_sha256"])
+
+            # Current source remains required even when this context was already drafted.
+            saved = {name: (draft_path.parent / name).read_bytes()
+                     for name in ("draft.json", "draft.md", "state.json")}
+            (root / "inbox" / "notes.md").unlink()
+            with patch("looping_box.model.generate_if_enabled") as generate:
+                stale = run_worker(root, "execution_engine", now="2026-06-24T12:03:00Z")
+            self.assertEqual(stale["status"], "failed")
+            self.assertEqual(stale["errors"][0]["code"], "source_reingest_required")
+            generate.assert_not_called()
+            self.assertEqual({name: (draft_path.parent / name).read_bytes() for name in saved}, saved)
 
     def test_execution_engine_refuses_missing_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +177,11 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual([i["relative_path"] for i in latest["items"]], ["inbox/b.md"])
             archived = [json.loads(p.read_text()) for p in (out / "history").glob("*-draft.json")]
             self.assertEqual([[i["relative_path"] for i in d["items"]] for d in archived], [["inbox/a.md"]])
+
+
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":

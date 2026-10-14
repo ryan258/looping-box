@@ -2,6 +2,7 @@
 pending reviews, gate gaps, approval hardening, exit codes, worker CLI, and model-layer limits."""
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -15,12 +16,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-# Decision records are HMAC-signed; tests must never touch ~/.config.
-os.environ["LOOPING_BOX_REVIEW_KEY"] = "test-review-key"
 
 from looping_box import model, supervisor, worker
 from looping_box import review as review_cli
-from looping_box._util import utc_now
 from looping_box.action_policy import match_keywords
 from looping_box.doctor import run_doctor
 from looping_box.phase1 import run_phase1
@@ -38,6 +36,7 @@ def _make_sop(root: Path, **extra) -> None:
         "routes": [{"label": "docs", "keywords": ["docs"]}],
         "boundary_gate": {"requires_review_keywords": ["deploy", "production"], "notification_message": "x"},
         "max_excerpt_chars": 120,
+        "max_file_bytes": 1000000,
     }
     sop.update(extra)
     (root / "config" / "sops" / "phase1_ingestion.json").write_text(json.dumps(sop), encoding="utf-8")
@@ -175,8 +174,9 @@ class ApprovalHardeningTests(unittest.TestCase):
             payload["source_items"][0]["review_reasons"] = ["docs"]
             path.write_text(json.dumps(payload), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "does not match"):
+            with self.assertRaisesRegex(ValueError, "review_evidence_invalid: .*identity or risk reasons do not agree"):
                 record_review(root, review["review_id"], "approved", note="x")
+            self.assertFalse((root / "staging" / "approvals" / (review["review_id"] + ".json")).exists())
 
     def test_noninteractive_override_needs_an_explicit_yes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +211,7 @@ class ExitCodeAndWorkerCliTests(unittest.TestCase):
 
     def test_worker_cli_honors_the_root_env_var_and_reports_blocked_as_2(self):
         with tempfile.TemporaryDirectory() as tmp:
+            _make_sop(Path(tmp))
             with patch.dict(os.environ, {"LOOPING_BOX_ROOT": tmp}), \
                     patch.object(sys, "argv", ["worker", "execution_engine"]), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -219,14 +220,14 @@ class ExitCodeAndWorkerCliTests(unittest.TestCase):
 
     def test_worker_cli_respects_the_project_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / ".looping_box.lock").write_text(
-                json.dumps({"created_at": utc_now(), "pid": 999}) + "\n", encoding="utf-8"
-            )
-            argv = ["worker", "context_builder", "--root", tmp]
-            with patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(worker.main(), 1)
-            self.assertIn("busy", err.getvalue())
-            self.assertFalse((Path(tmp) / "cache").exists())
+            _make_sop(Path(tmp))
+            with (Path(tmp) / ".looping_box.lock").open("w+") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                argv = ["worker", "context_builder", "--root", tmp]
+                with patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(worker.main(), 1)
+                self.assertIn("busy", err.getvalue())
+                self.assertFalse((Path(tmp) / "cache").exists())
 
 
 class FileCountLimitTests(unittest.TestCase):
@@ -235,7 +236,7 @@ class FileCountLimitTests(unittest.TestCase):
             root = Path(tmp)
             _make_sop(root)
             (root / "config" / "super_loop.json").write_text(
-                json.dumps({"max_files_per_cycle": 1}) + "\n", encoding="utf-8"
+                json.dumps({**supervisor.DEFAULT_CONFIG, "max_files_per_cycle": 1}) + "\n", encoding="utf-8"
             )
             (root / "inbox" / "a.txt").write_text("deploy a", encoding="utf-8")
             (root / "inbox" / "b.txt").write_text("deploy b", encoding="utf-8")
@@ -300,16 +301,23 @@ class ReportTests(unittest.TestCase):
 
 class DoctorTests(unittest.TestCase):
     def test_warns_when_the_lock_could_expire_during_a_run(self):
+        # This legacy setting is still valid, but cannot expire kernel ownership.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             shutil.copytree(ROOT / "config", root / "config")
-            (root / "config" / "super_loop.json").write_text(
-                json.dumps({"stale_lock_seconds": 20, "max_worker_runtime_seconds": 30}), encoding="utf-8"
-            )
+            path = root / "config/super_loop.json"
+            config = json.loads(path.read_text())
+            config.update(stale_lock_seconds=20, max_worker_runtime_seconds=30)
+            path.write_text(json.dumps(config), encoding="utf-8")
+            findings = run_doctor(root)
+            self.assertTrue(any(level == "ok" and "stale_lock_seconds is deprecated" in message
+                                for level, message, _ in findings))
+            self.assertFalse(any("delete .looping_box.lock" in remedy for _, _, remedy in findings))
 
-            warnings = [m for level, m, _ in run_doctor(root) if level == "warn"]
 
-            self.assertTrue(any("stale_lock_seconds" in m for m in warnings))
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":

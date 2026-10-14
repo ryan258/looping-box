@@ -1,8 +1,10 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -12,7 +14,11 @@ from looping_box.phase1 import run_phase1
 class Phase1IngestionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.root = Path(self.temp_dir.name).resolve()
+        env = patch.dict(os.environ, {"LOOPING_BOX_REVIEW_KEY": "test-review-key",
+                                      "XDG_CONFIG_HOME": str(self.root / "test-keys")}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
         (self.root / "config" / "sops").mkdir(parents=True)
         (self.root / "inbox").mkdir()
 
@@ -31,6 +37,7 @@ class Phase1IngestionTests(unittest.TestCase):
                         "notification_message": "Review required",
                     },
                     "max_excerpt_chars": 120,
+                    "max_file_bytes": 1_000_000,
                 }
             ),
             encoding="utf-8",
@@ -165,6 +172,11 @@ class Phase1IngestionTests(unittest.TestCase):
 
         self.assertEqual(result["summary"]["changed"], 0)
         self.assertEqual(result["changes"], [])
+
+
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":

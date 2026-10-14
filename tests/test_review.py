@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -13,8 +14,6 @@ from looping_box.phase1 import run_phase1
 from looping_box.review import list_reviews, record_review
 from looping_box.schema import validate
 
-# Decision records are HMAC-signed; tests must never touch ~/.config.
-os.environ["LOOPING_BOX_REVIEW_KEY"] = "test-review-key"
 
 SCHEMA_DIR = ROOT / "docs" / "schemas"
 REVIEW_RECORD_SCHEMA = json.loads((SCHEMA_DIR / "review_record.schema.json").read_text())
@@ -35,6 +34,7 @@ def _make_sop(root: Path) -> None:
                     "notification_message": "Review required",
                 },
                 "max_excerpt_chars": 120,
+                "max_file_bytes": 1_000_000,
             }
         ),
         encoding="utf-8",
@@ -42,6 +42,14 @@ def _make_sop(root: Path) -> None:
 
 
 class ReviewTests(unittest.TestCase):
+    def setUp(self):
+        keys = tempfile.TemporaryDirectory()
+        self.addCleanup(keys.cleanup)
+        env = patch.dict(os.environ, {"LOOPING_BOX_REVIEW_KEY": "test-review-key",
+                                      "XDG_CONFIG_HOME": keys.name}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_phase1_reuses_stable_review_for_unchanged_pending_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -134,7 +142,7 @@ class ReviewTests(unittest.TestCase):
                         "default_class": "review_required",
                         "classes": {
                             "safe_local_transform": [],
-                            "review_required": [],
+                            "review_required": ["secret"],
                             "blocked": ["deploy"],
                             "forbidden": [],
                         },
@@ -160,7 +168,7 @@ class ReviewTests(unittest.TestCase):
                         "default_class": "review_required",
                         "classes": {
                             "safe_local_transform": [],
-                            "review_required": [],
+                            "review_required": ["secret"],
                             "blocked": [],
                             "forbidden": ["deploy"],
                         },
@@ -248,7 +256,13 @@ class ReviewTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(list_reviews(root), [])
+            with self.assertRaisesRegex(ValueError, "review_evidence_invalid"):
+                list_reviews(root)
+
+
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":

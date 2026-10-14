@@ -31,6 +31,7 @@ def _make_sop(root: Path) -> None:
                     "notification_message": "Review required",
                 },
                 "max_excerpt_chars": 120,
+                "max_file_bytes": 1000000,
             }
         ),
         encoding="utf-8",
@@ -94,6 +95,11 @@ class SchemaFixtureTests(unittest.TestCase):
     def test_repo_action_classes_config_matches_schema(self):
         config = json.loads((ROOT / "config" / "action_classes.json").read_text())
         validate(config, ACTION_CLASSES_SCHEMA)
+
+
+def setUpModule():
+    from offline_fixtures import isolate_module
+    isolate_module()
 
 
 if __name__ == "__main__":
