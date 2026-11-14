@@ -14,6 +14,7 @@ cache/verifiers/*.json
 cache/workers/**/*.json
 cache/workers/**/*.md
 logs/transactions/*.jsonl
+logs/openrouter-examples/
 staging/pending_review.json
 staging/approvals/*.json
 staging/rejections/*.json

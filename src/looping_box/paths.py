@@ -125,18 +125,23 @@ def _check_references(value: Any, rule: dict[str, Any], schema: dict[str, Any], 
 
 
 def read_validated(path: Path, kind: str, **options: Any) -> dict[str, Any]:
+    return read_validated_snapshot(path, kind, **options)[0]
+
+
+def read_validated_snapshot(path: Path, kind: str, **options: Any) -> tuple[dict[str, Any], bytes]:
+    """Validate and return the exact bytes that supplied the parsed artifact."""
     path = file_path(path)
     code = "invalid_config" if kind in CONFIG_SCHEMAS else "invalid_artifact"
     try:
-        with path.open(encoding="utf-8") as handle:
-            data = json.load(handle)
+        raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:
         raise ValidationError(str(path), "$: invalid JSON", code=code) from exc
     try:
         _check_references(data, SCHEMAS[kind], SCHEMAS[kind], "$", path)
     except RecursionError as exc:
         raise ValidationError(str(path), "$: nesting too deep", code=code) from exc
-    return validate_data(data, kind, str(path), **options)
+    return validate_data(data, kind, str(path), **options), raw
 
 
 def matching_files(directory: Path, pattern: str) -> list[Path]:
@@ -164,8 +169,12 @@ def source_files(directory: Path, extensions: set[str]) -> list[Path]:
     directory = directory_path(directory)
     if not directory.exists():
         return []
+
+    def fail_scan(error: OSError) -> None:
+        raise OSError(f"input_scan_failed: {error}; restore access and re-ingest") from error
+
     files: list[Path] = []
-    for current, folders, names in os.walk(directory, followlinks=False):
+    for current, folders, names in os.walk(directory, onerror=fail_scan, followlinks=False):
         parent = directory_path(Path(current))
         folders[:] = sorted(name for name in folders
                             if not name.startswith(".") and not (parent / name).is_symlink())
@@ -174,5 +183,11 @@ def source_files(directory: Path, extensions: set[str]) -> list[Path]:
             if name.startswith(".") or candidate.is_symlink() or candidate.suffix.lower() not in extensions:
                 continue
             if stat.S_ISREG(candidate.lstat().st_mode):
+                relative = candidate.relative_to(directory).as_posix()
+                try:
+                    _relative_reference(relative)
+                    relative.encode("utf-8")
+                except (UnsafePathError, UnicodeError) as exc:
+                    raise UnsafePathError(repr(str(candidate)), "rename this input to a supported path") from exc
                 files.append(file_path(candidate))
     return sorted(files)

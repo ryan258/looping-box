@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "looping-box"
 version = "0.2.0"
-description = "Local, file-system-bounded automation loop that holds risky actions for human review."
+description = "Local drafting CLI that turns text files into traceable drafts and holds recognized wording for review."
 readme = "README.md"
 requires-python = ">=3.9,<3.15"
 classifiers = [

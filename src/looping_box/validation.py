@@ -74,7 +74,10 @@ DELTA_ID = {"type": "string", "pattern": r"^phase1-delta-[A-Za-z0-9]+(?:-(?:[2-9
 DEFS: dict[str, dict[str, Any]] = {
     "Path": PATH, "Hash": HASH, "Timestamp": TIMESTAMP, "ReviewID": REVIEW_ID,
     "WorkerID": WORKER, "Status": STATUS, "Class": CLASS,
-    "ProcessedFile": obj({"sha256": ref("Hash"), "size_bytes": NAT, "processed_at": ref("Timestamp")}),
+    "SourceSop": obj({"path": ref("Path"), "sha256": ref("Hash"), "name": STRING}),
+    "ProcessedFile": obj({"sha256": ref("Hash"), "size_bytes": NAT, "processed_at": ref("Timestamp"),
+                          "pending_review_release": ref("ReviewID"), "last_released_review": nullable(ref("ReviewID"))},
+                         optional=("pending_review_release", "last_released_review")),
     "FirstSeen": obj({"first_seen_path": ref("Path"), "first_seen_at": ref("Timestamp")}),
     "DeltaSummary": obj({"scanned": NAT, "changed": NAT, "skipped": NAT, "requires_review": BOOL}),
     "IngestionRun": obj({"generated_at": ref("Timestamp"), "delta_path": nullable(ref("Path")), "summary": ref("DeltaSummary")}),
@@ -82,12 +85,15 @@ DEFS: dict[str, dict[str, Any]] = {
                    "matched_routes": array(STRING), "review_reasons": array(STRING), "excerpt": STRING,
                    "approved_review": ref("ReviewID")}, optional=("approved_review",)),
     "Skip": obj({"relative_path": ref("Path"), "sha256": ref("Hash"),
-                 "reason": {"enum": ["already_processed", "review_decision_recorded"]}}),
+                 "reason": {"enum": ["already_processed", "review_decision_recorded"]},
+                 "current": obj({"matched_routes": array(STRING), "excerpt": STRING,
+                                 "approved_review": ref("ReviewID")}, optional=("approved_review",))},
+                optional=("current",)),
     "Warning": obj({"code": STRING, "review_id": ref("ReviewID"), "relative_path": ref("Path"), "message": STRING}),
     "Gate": obj({"status": {"enum": ["clear", "pending_review"]}, "payload": nullable(ref("Path")), "reasons": array(STRING)}),
     "ContextItem": obj({"relative_path": ref("Path"), "sha256": ref("Hash"), "matched_routes": array(STRING),
-                        "excerpt": STRING, "source_delta": ref("Path"), "approved_review": ref("ReviewID")},
-                       optional=("approved_review",)),
+                        "excerpt": STRING, "source_delta": ref("Path"), "approved_review": ref("ReviewID"),
+                        "source_sop": ref("SourceSop")}, optional=("approved_review", "source_sop")),
     "DraftItem": obj({"relative_path": ref("Path"), "matched_routes": array(STRING), "draft": STRING,
                       "approved_review": ref("ReviewID"), "model": STRING, "response_sha256": ref("Hash")},
                      optional=("approved_review", "model", "response_sha256")),
@@ -102,7 +108,7 @@ DEFS: dict[str, dict[str, Any]] = {
 DEFS["Gate"]["if"] = {"properties": {"status": {"const": "clear"}}}
 DEFS["Gate"]["then"] = {"properties": {"payload": {"type": "null"}, "reasons": {"maxItems": 0}}}
 DEFS["BlockedItem"] = obj({**DEFS["ContextItem"]["properties"], "review_reasons": array(STRING, minItems=1),
-                           "pending_review_payload": ref("Path")}, optional=("approved_review",))
+                           "pending_review_payload": ref("Path")}, optional=("approved_review", "source_sop"))
 DEFS["DraftItem"]["dependentRequired"] = {"model": ["response_sha256"], "response_sha256": ["model"]}
 
 
@@ -115,7 +121,9 @@ RAW_SCHEMAS = {
         "processed_files": mapping(ref("ProcessedFile"), ref("Path")),
         "processed_hashes": mapping(ref("FirstSeen"), ref("Hash")), "runs": array(ref("IngestionRun")),
         "present_paths": array(ref("Path")), "last_run_at": ref("Timestamp"), "last_delta_path": nullable(ref("Path")),
-    }, optional=("present_paths", "last_run_at", "last_delta_path")),
+        "custom_delta_dirs": array(ref("Path"), uniqueItems=True),
+        "same_time_delta_order": mapping(array(ref("Path"), minItems=1, uniqueItems=True), ref("Timestamp")),
+    }, optional=("present_paths", "last_run_at", "last_delta_path", "custom_delta_dirs", "same_time_delta_order")),
     "phase1_delta": artifact("phase1.delta.v1", {
         "run_id": DELTA_ID, "generated_at": ref("Timestamp"),
         "sop": obj({"path": ref("Path"), "sha256": ref("Hash"), "name": STRING}),
@@ -123,8 +131,9 @@ RAW_SCHEMAS = {
         "summary": ref("DeltaSummary"), "changes": array(ref("Change")), "skipped": array(ref("Skip")),
         "warnings": array(ref("Warning")), "reconciliation": obj({
             "scanned_paths": array(ref("Path"), uniqueItems=True), "removed_paths": array(ref("Path"), uniqueItems=True)}),
+        "prior_rejection_signatures": array(ref("Hash"), uniqueItems=True),
         "boundary_gate": ref("Gate"), "delta_path": ref("Path"),
-    }, optional=("warnings", "reconciliation")),
+    }, optional=("warnings", "reconciliation", "prior_rejection_signatures")),
     "pending_review_index": artifact("pending-review-index.v1", {
         "generated_at": ref("Timestamp"), "latest": {"anyOf": [ref("Path"), {"const": ""}]},
         "reviews": array(ref("Path"), uniqueItems=True)}),
@@ -132,19 +141,24 @@ RAW_SCHEMAS = {
         "review_id": ref("ReviewID"), "generated_at": ref("Timestamp"), "source": {"const": "phase1"},
         "notification_message": STRING, "action_class": ref("Class"), "risk_reasons": array(STRING),
         "source_items": array(ref("Change"), minItems=1, maxItems=1), "generated_artifacts": array(ref("Path")),
+        "source_evidence_sha256": ref("Hash"), "source_sop": ref("SourceSop"),
         "verifier": obj({"required": BOOL, "status": {"enum": ["pending", "passed", "failed", "not_applicable"]},
-                         "result": nullable(ref("Path"))}), "suggested_verification": array(STRING)}),
+                         "result": nullable(ref("Path"))}), "suggested_verification": array(STRING)},
+        optional=("source_evidence_sha256", "source_sop")),
     "review_record": artifact("review-record.v2", {
         "review_id": ref("ReviewID"), "generated_at": ref("Timestamp"), "decision": {"enum": ["approved", "rejected"]},
         "note": NONBLANK, "approver": NONBLANK, "interactive": BOOL, "payload_sha256": ref("Hash"),
-        "verifier_result": nullable(ref("Path")), "signature": ref("Hash")}),
+        "verifier_result": nullable(ref("Path")), "signature": ref("Hash"),
+        "verifier_sha256": ref("Hash"), "audit_expected": {"const": True}, "audit_binds_record": {"const": True}},
+        optional=("verifier_sha256", "audit_expected", "audit_binds_record")),
     "verifier_result": artifact("verifier-result.v1", {
         "review_id": ref("ReviewID"), "generated_at": ref("Timestamp"), "status": {"enum": ["passed", "failed"]},
         "checks": array(obj({"name": STRING, "status": {"enum": ["passed", "failed"]}, "message": STRING}), minItems=1)}),
     "worker_state": artifact("worker.state.v1", {
         "worker_id": ref("WorkerID"), "consumed_inputs": array(ref("Path")), "last_run_at": ref("Timestamp"),
-        "last_context_sha256": ref("Hash"), "last_model": nullable(STRING),
-    }, optional=("last_run_at", "last_context_sha256", "last_model")),
+        "last_context_sha256": ref("Hash"), "last_model": nullable(STRING), "last_draft_sha256": ref("Hash"),
+        "retired_context_sha256": ref("Hash"),
+    }, optional=("last_run_at", "last_context_sha256", "last_model", "last_draft_sha256", "retired_context_sha256")),
     "context_package": artifact("worker.context-package.v1", {
         "worker_id": {"const": "context_builder"}, "generated_at": ref("Timestamp"), "status": {"enum": ["complete", "blocked"]},
         "source_deltas": array(ref("Path")), "items": array(ref("ContextItem")), "blocked_inputs": array(ref("BlockedItem")),
@@ -174,6 +188,7 @@ RAW_SCHEMAS = {
         "worker_outputs": array(ref("WorkerOutput")), "recovery": ref("Recovery")}),
 }
 DEFS["WorkerOutput"] = RAW_SCHEMAS["worker_output"]
+RAW_SCHEMAS["review_record"]["dependentRequired"] = {"audit_binds_record": ["audit_expected"]}
 AUDIT_COMMON = {"generated_at": ref("Timestamp"), "prev": {"anyOf": [ref("Hash"), {"const": ""}]}, "hash": ref("Hash")}
 AUDIT_FIELDS = {
     "phase1.run": {"run_id": DELTA_ID, "changed": NAT, "skipped": NAT, "gate": {"enum": ["clear", "pending_review"]},
@@ -181,12 +196,13 @@ AUDIT_FIELDS = {
     "supervisor.run": {"status": ref("Status"), "plan": array(ref("WorkerID")), "source_deltas": array(ref("Path")),
                        "worker_statuses": mapping(ref("Status"), ref("WorkerID")), "blocked_reason": nullable(STRING)},
     "review.approved": {"review_id": ref("ReviewID"), "approver": NONBLANK, "interactive": BOOL,
-                        "note": NONBLANK, "payload_sha256": ref("Hash")},
+                        "note": NONBLANK, "payload_sha256": ref("Hash"), "review_record_sha256": ref("Hash")},
 }
 AUDIT_FIELDS["review.rejected"] = AUDIT_FIELDS["review.approved"]
 RAW_SCHEMAS["audit_event"] = artifact("audit-event.v1", {**AUDIT_COMMON, "event": {"enum": list(AUDIT_FIELDS)}})
 RAW_SCHEMAS["audit_event"]["allOf"] = [
-    {"if": {"properties": {"event": {"const": event}}}, "then": obj(fields)}
+    {"if": {"properties": {"event": {"const": event}}},
+     "then": obj(fields, optional=("review_record_sha256",))}
     for event, fields in AUDIT_FIELDS.items()
 ]
 CONFIG_SCHEMAS = {

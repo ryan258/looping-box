@@ -4,11 +4,12 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import file_path
+from .paths import UnsafePathError, file_path
 
 
 @dataclass
@@ -44,6 +45,12 @@ def _after_fork_parent() -> None:
 os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_parent, after_in_child=_after_fork)
 
 
+def _check_lock_inode(path: Path, fd: int) -> None:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise UnsafePathError(path, "workspace lock must be a regular file with exactly one link")
+
+
 def acquire(path: Path, generated_at: str) -> None:
     path = file_path(path)
     with _guard:
@@ -54,8 +61,9 @@ def acquire(path: Path, generated_at: str) -> None:
             owner.depth += 1
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
+            _check_lock_inode(path, fd)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
@@ -96,10 +104,11 @@ def is_held(path: Path) -> bool:
     """Probe kernel ownership without creating a file or changing diagnostics."""
     path = file_path(path)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return False
     try:
+        _check_lock_inode(path, fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

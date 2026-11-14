@@ -7,6 +7,8 @@ import hmac
 import json
 import os
 import secrets
+import stat
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +17,7 @@ from typing import Any
 
 from . import locking
 from .validation import ValidationError, validate_data
-from .paths import UnsafePathError, contained_path, directory_path, file_path, read_validated
+from .paths import UnsafePathError, contained_path, directory_path, file_path, read_validated, read_validated_snapshot
 
 PENDING_REVIEW_INDEX_SCHEMA = "looping-box.pending-review-index.v1"
 AUDIT_EVENT_SCHEMA = "looping-box.audit-event.v1"
@@ -35,6 +37,20 @@ def rel(root: Path, path: Path) -> str:
     return Path(os.path.relpath(path, root)).as_posix()
 
 
+def retained_phase1_delta_dirs(state: dict[str, Any]) -> set[str]:
+    """Collect alternate queues from the registry and older Phase 1 states."""
+    directories = set(state.get("custom_delta_dirs", []))
+    references = [state.get("last_delta_path"), *(run["delta_path"] for run in state.get("runs", []))]
+    for reference in references:
+        if reference is not None:
+            parent = Path(reference).parent.as_posix()
+            if parent == ".":
+                raise ValueError(f"{reference}: Phase 1 delta must be inside a workspace queue directory")
+            directories.add(parent)
+    directories.discard("cache/deltas")
+    return directories
+
+
 def read_json(path: Path) -> dict[str, Any]:
     path = file_path(path)
     with path.open("r", encoding="utf-8") as handle:
@@ -44,9 +60,13 @@ def read_json(path: Path) -> dict[str, Any]:
 def write_bytes(path: Path, data: bytes) -> None:
     """Replace one file atomically; retain the prior file on any pre-rename failure."""
     path = file_path(path)
-    temp_path = file_path(path.with_name(f"{path.name}.{os.getpid()}.tmp"))
+    # Keep rejecting unsafe remnants from versions that used a predictable name.
+    file_path(path.with_name(f"{path.name}.{os.getpid()}.tmp"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    with temp_path.open("wb") as handle:
+    with tempfile.NamedTemporaryFile(
+        mode="wb", dir=path.parent, prefix=f"{path.name}.", suffix=".tmp", delete=False
+    ) as handle:
+        temp_path = Path(handle.name)
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
@@ -179,15 +199,28 @@ def review_identity(items: list[dict[str, Any]]) -> str:
     return "review-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
+def review_evidence_digest(payload: dict[str, Any]) -> str:
+    fields = ("action_class", "risk_reasons", "source_items", "source_sop")
+    evidence = {field: payload[field] for field in fields if field in payload}
+    return hashlib.sha256(json.dumps(evidence, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def read_review_payload(path: Path) -> dict[str, Any]:
+    return read_review_payload_snapshot(path)[0]
+
+
+def read_review_payload_snapshot(path: Path) -> tuple[dict[str, Any], str]:
     try:
-        payload = read_validated(path, "review_payload")
+        payload, raw = read_validated_snapshot(path, "review_payload")
         item = payload["source_items"][0]
         if (payload["review_id"] != review_identity(payload["source_items"])
                 or path.name != payload["review_id"] + ".json"
                 or not item["review_reasons"] or payload["risk_reasons"] != item["review_reasons"]):
             raise ValueError("identity or risk reasons do not agree")
-        return payload
+        stamp = payload.get("source_evidence_sha256")
+        if stamp is not None and not hmac.compare_digest(stamp, review_evidence_digest(payload)):
+            raise ValueError("staged source evidence was edited")
+        return payload, hashlib.sha256(raw).hexdigest()
     except UnsafePathError as exc:
         raise UnsafePathError(path, f"review_evidence_invalid: {exc}") from exc
     except (OSError, ValueError) as exc:
@@ -229,8 +262,8 @@ def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]
         ):
             payload_path = file_path(staging_dir / "reviews" / f"{review_id}.json")
             try:
-                payload = read_review_payload(payload_path)
-                if not hmac.compare_digest(record["payload_sha256"], sha256_file(payload_path)):
+                payload, payload_sha256 = read_review_payload_snapshot(payload_path)
+                if not hmac.compare_digest(record["payload_sha256"], payload_sha256):
                     continue
                 if decision == "approved":
                     reference = record["verifier_result"]
@@ -238,7 +271,14 @@ def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]
                             or payload["verifier"]["status"] != "passed"
                             or payload["verifier"]["result"] != reference):
                         continue
-                    verifier = read_validated(resolve_under_root(staging_dir.parent, reference), "verifier_result")
+                    verifier, verifier_bytes = read_validated_snapshot(
+                        resolve_under_root(staging_dir.parent, reference), "verifier_result"
+                    )
+                    verifier_digest = record.get("verifier_sha256")
+                    if verifier_digest is not None and not hmac.compare_digest(
+                        verifier_digest, hashlib.sha256(verifier_bytes).hexdigest()
+                    ):
+                        continue
                     if (verifier["review_id"] != review_id or verifier["status"] != "passed"
                             or not all(check["status"] == "passed" for check in verifier["checks"])):
                         continue
@@ -254,6 +294,40 @@ def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]
 
 def decision_for(staging_dir: Path, review_id: str) -> str | None:
     return decision_state(staging_dir, review_id)[0]
+
+
+def signed_rejections(
+    staging_dir: Path, source_hashes: dict[str, str],
+) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
+    """Find active signed rejections bound to the supplied source bytes."""
+    directory = directory_path(staging_dir / "rejections")
+    try:
+        paths = sorted(directory.iterdir())
+    except FileNotFoundError:
+        return
+    for path in paths:
+        if not (path.name.startswith("review-") and path.suffix == ".json"):
+            continue
+        try:
+            record = read_validated(path, "review_record")
+            review_id = record["review_id"]
+            if path.stem != review_id or record["decision"] != "rejected":
+                continue
+            payload = read_review_payload(staging_dir / "reviews" / path.name)
+        except UnsafePathError:
+            raise
+        except FileNotFoundError:
+            continue
+        except ValueError as exc:
+            # Missing or invalid payloads cannot bind a rejection. An I/O
+            # failure reading a present payload means evidence is unavailable.
+            if isinstance(exc.__cause__, OSError) and not isinstance(exc.__cause__, FileNotFoundError):
+                raise
+            continue
+        item = payload["source_items"][0]
+        if (source_hashes.get(item["relative_path"]) == item["sha256"]
+                and decision_state(staging_dir, review_id)[0] == "rejected"):
+            yield record, payload
 
 
 def decision_record_exists(staging_dir: Path, review_id: str) -> bool:
@@ -308,14 +382,94 @@ def inspect_audit_log(path: Path) -> AuditInspection:
     return result
 
 
+def _check_audit_inode(path: Path, metadata: os.stat_result) -> None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise UnsafePathError(path, "audit log must be a regular file with exactly one link")
+
+
+def audit_destination_writable(path: Path) -> bool:
+    """Check the permissions and inode needed to append without opening for write."""
+    path = file_path(path)
+    try:
+        _check_audit_inode(path, path.lstat())
+    except FileNotFoundError:
+        parent = path.parent
+        while not parent.exists():
+            parent = parent.parent
+        return os.access(parent, os.W_OK | os.X_OK)
+    return os.access(path, os.W_OK)
+
+
+def preflight_audit(root: Path, log: str) -> AuditInspection:
+    """Check the log under the caller's project lock without creating it."""
+    path = resolve_under_root(root, f"logs/transactions/{log}.jsonl")
+    writable = audit_destination_writable(path)
+    inspected = inspect_audit_log(path)
+    if inspected.broken_at is not None:
+        raise ValidationError(str(path), f"line {inspected.broken_at}: broken audit chain", code="audit_invalid")
+    if not writable:
+        raise PermissionError(f"audit_unwritable: {path}: check audit log and directory permissions")
+    return inspected
+
+
+_REVIEW_AUDIT_FIELDS = ("generated_at", "review_id", "approver", "interactive", "note", "payload_sha256")
+
+
+def review_audit_event(record: dict[str, Any]) -> dict[str, Any]:
+    event = {"event": f"review.{record['decision']}", **{name: record[name] for name in _REVIEW_AUDIT_FIELDS}}
+    if record.get("audit_binds_record") is True:
+        signed_record = json.dumps(record, sort_keys=True).encode("utf-8")
+        event["review_record_sha256"] = hashlib.sha256(signed_record).hexdigest()
+    return event
+
+
+def missing_review_audit_events(root: Path, inspection: AuditInspection | None) -> list[str]:
+    """Identify retained decision records that expect a missing review event."""
+    if inspection is not None and inspection.broken_at is not None:
+        return []  # The chain failure already identifies unavailable audit evidence.
+    fields = ("event", *_REVIEW_AUDIT_FIELDS, "review_record_sha256")
+    events = inspection.events if inspection is not None else ()
+    logged = {tuple(event.get(name) for name in fields) for event in events
+              if event["event"] in ("review.approved", "review.rejected")}
+    missing = {}
+    for folder, suffix, decision in (
+        ("approvals", ".json", "approved"),
+        ("rejections", ".json", "rejected"),
+        ("archive", ".approval.json", "approved"),
+        ("archive", ".rejection.json", "rejected"),
+    ):
+        directory = directory_path(resolve_under_root(root, f"staging/{folder}"))
+        try:
+            paths = sorted(directory.iterdir())
+        except FileNotFoundError:
+            continue
+        for path in paths:
+            if not path.name.endswith(suffix):
+                continue
+            try:
+                record, raw = read_validated_snapshot(path, "review_record")
+            except ValidationError:
+                continue  # Historical archives may contain malformed decision evidence.
+            if record.get("audit_expected") is not True or record["decision"] != decision:
+                continue
+            name = record["review_id"]
+            if folder == "archive":
+                name += "-" + hashlib.sha256(raw).hexdigest()
+            if path.name != name + suffix:
+                continue
+            event = review_audit_event(record)
+            event_key = tuple(event.get(name) for name in fields)
+            if event_key not in logged:
+                missing.setdefault(event_key, rel(root, path))
+    return sorted(missing.values())
+
+
 def append_audit(root: Path, log: str, event: dict[str, Any]) -> None:
     """Validate the entire existing chain, then append/flush/fsync under the lock."""
     root = Path(root).resolve()
-    path = file_path(resolve_under_root(root, f"logs/transactions/{log}.jsonl"))
     with project_lock(root, event.get("generated_at", utc_now())):
-        inspected = inspect_audit_log(path)
-        if inspected.broken_at is not None:
-            raise ValidationError(str(path), f"line {inspected.broken_at}: broken audit chain", code="audit_invalid")
+        inspected = preflight_audit(root, log)
+        path = file_path(resolve_under_root(root, f"logs/transactions/{log}.jsonl"))
         previous = inspected.events[-1]["hash"] if inspected.events else ""
         body = {"schema": AUDIT_EVENT_SCHEMA, **event, "prev": previous}
         body.pop("hash", None)
@@ -324,10 +478,16 @@ def append_audit(root: Path, log: str, event: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         # A valid last JSON record need not already have a terminating newline.
         separator = "\n" if path.exists() and path.stat().st_size and not path.read_bytes().endswith(b"\n") else ""
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(separator + json.dumps(body, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(path, flags, 0o666)
+        try:
+            _check_audit_inode(path, os.fstat(fd))
+            with os.fdopen(fd, "a", encoding="utf-8", closefd=False) as handle:
+                handle.write(separator + json.dumps(body, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def verify_audit_chain(path: Path) -> int | None:
