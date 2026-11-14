@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Section D winner: an overclaim tripwire for marketing copy. Your own words, your own gate.
 set -euo pipefail
-export DEMO_NAME=d
 source "$(dirname "${BASH_SOURCE[0]}")/../demo-env.sh"
 demo_reset
 
@@ -12,13 +11,13 @@ demo_add_keywords review_required guarantee unlimited revolutionary
 IN="${LOOPING_BOX_ROOT}/inbox"
 echo "Docs summary: the onboarding guide covers setup, login, and first project." > "${IN}/guide.md"
 echo "Launch copy: our revolutionary platform offers unlimited storage and a guaranteed 10x ROI." > "${IN}/launch.md"
-startday
+startday 2
 say_step "Held:"
 demo_holds
 
 say_step "The writer tones it down and saves the file..."
 echo "Launch copy: our platform offers 1 TB of storage and early customers saw faster reporting." > "${IN}/launch.md"
-startday
+startday 0
 say_step "Held now:"
 demo_holds
 echo

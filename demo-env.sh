@@ -1,25 +1,34 @@
-# Sourced by demo-*.sh. Demos run in a throwaway workspace so they are repeatable
-# and never touch this repo's inbox, state, or logs.
+# Sourced by the demo scripts. Each fixture uses a fresh, offline workspace.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# DEMO_NAME (set before sourcing) gives each demo its own throwaway workspace.
-export LOOPING_BOX_ROOT="${TMPDIR:-/tmp}/looping-box-demo${DEMO_NAME:+-${DEMO_NAME}}"
-# Demo-only signing key (real use: a private key outside the workspace).
+export OPENROUTER_API_KEY= MODEL_CONTEXT_BUILDER= MODEL_EXECUTION_ENGINE= MODEL_VERIFIER=
+unset OPENROUTER_BASE_URL LOOPING_BOX_ALLOW_NONINTERACTIVE
 export LOOPING_BOX_REVIEW_KEY="demo-key-not-a-secret"
+export LOOPING_BOX_APPROVER="${DEMO_APPROVER:-demo-operator}"
 
 lb() {  # lb <phase1|supervisor|review|worker> [args...]
   local tool="$1"; shift
   PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m "looping_box.${tool}" "$@"
 }
 
-# startday.sh exits 2 when something is held for a human; that is the expected outcome here.
 startday() {
-  "${ROOT_DIR}/startday.sh" || [ $? -eq 2 ]
+  local expected="$1" code=0
+  "${ROOT_DIR}/startday.sh" --root "${LOOPING_BOX_ROOT}" || code=$?
+  if [ "${code}" -ne "${expected}" ]; then
+    printf 'Expected run exit %s; got %s.\n' "${expected}" "${code}" >&2
+    return 1
+  fi
 }
 
 demo_reset() {
-  rm -rf "${LOOPING_BOX_ROOT}"
-  mkdir -p "${LOOPING_BOX_ROOT}/inbox"
-  cp -R "${ROOT_DIR}/config" "${LOOPING_BOX_ROOT}/config"
+  LOOPING_BOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/looping-box-demo.XXXXXXXX")" || return
+  export LOOPING_BOX_ROOT
+  export XDG_CONFIG_HOME="${LOOPING_BOX_ROOT}/private-config"
+  PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m looping_box init "${LOOPING_BOX_ROOT}" >/dev/null || return
+  printf 'Demo workspace: %s\n' "${LOOPING_BOX_ROOT}"
+}
+
+demo_add_held_release() {
+  printf '%s\n' 'Please deploy the release and send the announcement email.' > "${LOOPING_BOX_ROOT}/inbox/release.txt"
 }
 
 approve() { LOOPING_BOX_ALLOW_NONINTERACTIVE=1 lb review approve "$@" < /dev/null; }  # demos opt out of the TTY on purpose

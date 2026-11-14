@@ -1,0 +1,540 @@
+[
+  {
+    "id": "01",
+    "title": "Resume a fix after an interruption",
+    "files": {
+      "checkpoint.md": "Context: I reproduced the blank preview after opening a saved template. Last good step was loading the sample project. Next step: compare the saved template with the sample before changing the parser."
+    },
+    "expect": "draft",
+    "check": "Find the source path and the exact restart point in draft.md.",
+    "next": "Return later, open the draft, and try only the comparison named in the note."
+  },
+  {
+    "id": "02",
+    "title": "Keep a stopping point beside a follow-up",
+    "files": {
+      "last-good.txt": "Context: The first four samples open with keyboard controls. Sample five is the first unchecked item.",
+      "next-session.txt": "Task: Start on sample five. Record whether Escape restores focus to the control that opened the panel."
+    },
+    "expect": "draft",
+    "check": "The last confirmed observation and the next action have separate source headings.",
+    "next": "Open sample five and capture the result in a third note. Keep the earlier checkpoint as evidence."
+  },
+  {
+    "id": "03",
+    "title": "Save a failed attempt before switching approaches",
+    "files": {
+      "attempt-a.md": "Context: Replacing the thumbnail left the same crop mismatch. The original image was 1200 by 630.",
+      "attempt-b.md": "Next step: compare image dimensions with the container before adjusting CSS again."
+    },
+    "expect": "draft",
+    "check": "The failed attempt and the proposed next step stay separately attributable.",
+    "next": "Read the failed attempt before retrying the task. Add a new source for the first observation from the new approach."
+  },
+  {
+    "id": "04",
+    "title": "Keep exact identifiers in a dictated note",
+    "files": {
+      "capture.txt": "Notes: Check fixture FN-37 on version 0.4.12. The field is reopen_at and the sample value is 2026-11-03T09:15:00Z."
+    },
+    "expect": "draft",
+    "check": "Compare the ID, version, field name, and timestamp with the source.",
+    "next": "Use the draft as a reference for the next session. Correct any dictation error in the source and run another pass."
+  },
+  {
+    "id": "05",
+    "title": "Carry a fallback decision into the next session",
+    "files": {
+      "decision.json": "{\"decision\":\"Keep the plain text version available\",\"reason\":\"The visual format is harder to scan on a small screen\",\"fallback\":\"Open the plain text version first\"}"
+    },
+    "expect": "draft",
+    "check": "The draft includes the JSON text as an excerpt. The decision and its fallback remain readable.",
+    "next": "Use the fallback on a small screen and save the observed result as a separate note."
+  },
+  {
+    "id": "06",
+    "title": "Preserve two accounts of the same session",
+    "files": {
+      "session-a.md": "Notes: The checklist opened in a new tab during the keyboard walkthrough.",
+      "session-b.md": "Notes: The checklist opened in the current tab when launched from the bookmark."
+    },
+    "expect": "draft",
+    "check": "Both observations appear under their own source paths. The different launch conditions remain visible.",
+    "next": "Repeat both paths once and record the conditions you can reproduce."
+  },
+  {
+    "id": "07",
+    "title": "Restart from a known folder after a move",
+    "files": {
+      "restore-check.md": "Task: After copying the project to the local desktop folder, compare the saved draft path and note the first missing file."
+    },
+    "expect": "draft",
+    "check": "The draft gives you a short restart instruction and its original path.",
+    "next": "Run doctor in the example shell for a read-only workspace check. Use the draft as the checklist."
+  },
+  {
+    "id": "08",
+    "title": "Review a handoff destination before sharing",
+    "files": {
+      "handoff-target.txt": "Send the handoff to the design mailing list. The note only needs the unresolved keyboard focus issue."
+    },
+    "expect": "review_required",
+    "check": "The review lists the source and the configured term send. The held text is outside the working draft.",
+    "next": "Open the review and decide whether the destination is appropriate for a draft. Approval makes the source eligible for local drafting."
+  },
+  {
+    "id": "09",
+    "title": "Turn an open question into a small experiment",
+    "files": {
+      "question.md": "Task: Does the empty state make it clear where to begin? Compare the current first sentence with the shorter version using the same empty workspace.",
+      "control.md": "Requirements: Keep the button label and layout fixed while comparing the two sentences."
+    },
+    "expect": "draft",
+    "check": "The question and fixed conditions appear as separate source excerpts.",
+    "next": "Try both versions, then add a note with the exact difference you observed."
+  },
+  {
+    "id": "10",
+    "title": "Carry a deliberate deferral forward",
+    "files": {
+      "deferred.md": "Decision: Keep search out of this pass. Revisit when the first 12 sample entries can be opened by keyboard and each has a short description."
+    },
+    "expect": "draft",
+    "check": "Find the deferral and the specific condition for revisiting it.",
+    "next": "When that condition is met, add a dated observation alongside the original decision."
+  },
+  {
+    "id": "11",
+    "title": "Shrink a Unicode regression to one input",
+    "files": {
+      "01-repro.txt": "Regression context. The label Á arrives as A plus U+0301. In the rename dialog, Backspace should clear the grapheme in one step. Observed: the base letter remains. Local fixture: label-combining.txt.",
+      "02-control.txt": "Control notes. The single-code-point label Á clears in one step in the same dialog. The only input change is the Unicode representation."
+    },
+    "expect": "draft",
+    "check": "Find both source paths and their separate expected and observed behavior in the Markdown draft.",
+    "next": "Turn the two representations into a paired regression test in your own project."
+  },
+  {
+    "id": "12",
+    "title": "Compare two API responses at a compatibility boundary",
+    "files": {
+      "01-client-expects.json": "{\"fixture\":\"client-v1\",\"status\":\"ready\",\"items\":[],\"page\":{\"cursor\":null}}",
+      "02-candidate-returns.json": "{\"fixture\":\"server-candidate\",\"status\":\"ready\",\"items\":[],\"page\":{}}"
+    },
+    "expect": "draft",
+    "check": "Read the two JSON excerpts side by side. The client fixture contains a null cursor and the server fixture omits the field.",
+    "next": "Make the missing-versus-null case explicit in the contract test before changing either fixture."
+  },
+  {
+    "id": "13",
+    "title": "Separate a migration rehearsal from a live operation",
+    "files": {
+      "01-rehearsal.md": "# Migration rehearsal notes\nA local fixture has 12 active rows and 2 archived rows. The second invocation should keep both counts steady. Save both counts with the command transcript.",
+      "02-live-plan.txt": "Apply the migration to the production database after the backup window. Verify the active and archived row counts afterward."
+    },
+    "expect": "blocked",
+    "check": "The review payload for 02-live-plan.txt shows the blocked class and the matched term production. The local rehearsal note is a separate input.",
+    "next": "Use the fixture counts to write the rehearsal checklist. Keep live operation decisions in your deployment tool."
+  },
+  {
+    "id": "14",
+    "title": "Turn a held prohibition into a positive invariant",
+    "files": {
+      "transport-invariant.md": "# Transport unit test\nThe client must never send an event while the retry clock is frozen. Expected fake transport calls: 0."
+    },
+    "expect": "review_required",
+    "check": "The pending review shows send as the matched term, including when the sentence describes a prohibition.",
+    "next": "In the disposable source, try 'Expected fake transport calls while the retry clock is frozen: 0.' Run another pass and inspect the draft and review list."
+  },
+  {
+    "id": "15",
+    "title": "Keep packaging checks specific to each platform",
+    "files": {
+      "01-wheel-macos.txt": "Packaging notes. Python 3.11 on macOS arm64. Fixture install opens the CLI help and finds the bundled template files. Record the wheel filename with the observation.",
+      "02-wheel-linux.txt": "Packaging notes. Python 3.11 on Linux x86_64. Wheel installation is scheduled for the next local matrix pass. Record import, CLI help, and bundled template checks."
+    },
+    "expect": "draft",
+    "check": "The draft keeps the recorded macOS fixture observation and the planned Linux check under distinct source paths.",
+    "next": "Use the excerpts to build a two-row verification matrix with separate observed and pending states."
+  },
+  {
+    "id": "16",
+    "title": "Pair a performance baseline with a comparable trial",
+    "files": {
+      "01-index-baseline.json": "{\"fixture\":\"400-small-files\",\"mode\":\"cold\",\"wall_ms\":[338,342,347],\"peak_mb\":42}",
+      "02-index-trial.json": "{\"fixture\":\"400-small-files\",\"mode\":\"cold\",\"wall_ms\":[271,269,278],\"peak_mb\":57}"
+    },
+    "expect": "draft",
+    "check": "The draft preserves the two trial series and peak memory figures as excerpts.",
+    "next": "Compare runtime and peak memory separately before deciding whether the trade-off fits your workload."
+  },
+  {
+    "id": "17",
+    "title": "Reproduce a zero-value configuration bug",
+    "files": {
+      "01-trigger.json": "{\"fixture\":\"local-clock\",\"poll_interval_ms\":0,\"expected\":\"poll once immediately\"}",
+      "02-control.json": "{\"fixture\":\"local-clock\",\"poll_interval_ms\":1,\"expected\":\"poll once after 1 ms\"}",
+      "03-observation.txt": "Regression notes. Zero falls through to the 250 ms fallback. One uses the requested interval. Suspect a truthiness check in settings normalization."
+    },
+    "expect": "draft",
+    "check": "Find the two configs and the observation under separate source paths. The excerpts preserve the literal zero.",
+    "next": "Add the smallest config normalization test that asserts an explicit zero survives parsing."
+  },
+  {
+    "id": "18",
+    "title": "Compare a synthetic auth header with a field-only trace",
+    "files": {
+      "01-header-example.txt": "Authorization: Bearer FIXTURE-ONLY-NOT-A-REAL-VALUE\nRequest ID: demo-47",
+      "02-field-only.json": "{\"request_id\":\"demo-47\",\"header_present\":true,\"http_status\":401,\"mode\":\"synthetic\"}"
+    },
+    "expect": "blocked",
+    "check": "The review payload for 01-header-example.txt shows bearer and the blocked class. The field-only trace still preserves the fields needed for a status-code repro.",
+    "next": "For a real bug report, start with the field-only structure and substitute synthetic data for header values."
+  },
+  {
+    "id": "19",
+    "title": "Keep a feature flag retirement proposal reviewable",
+    "files": {
+      "01-inventory.md": "# Flag inventory notes\ncompact_sidebar is read in layout.py and test_layout.py. Fixture defaults: false in baseline, true in the trial. The legacy render still has a test.",
+      "02-retirement.txt": "Delete the compact_sidebar flag after checking the legacy render case. Keep the fixture comparison beside this proposal."
+    },
+    "expect": "review_required",
+    "check": "The retirement proposal has a pending review for delete. The inventory records the specific files and values a maintainer should check.",
+    "next": "Write down the condition that must be true before editing the flag, then inspect the proposal and decide whether it belongs in the local draft."
+  },
+  {
+    "id": "20",
+    "title": "Find a mismatch between help text and observed behavior",
+    "files": {
+      "01-docs.md": "# CLI docs\nThe --limit flag defaults to 25 rows. With --limit 0, the example expects an empty result.",
+      "02-observed.txt": "CLI regression notes. Command: example list --limit 0. Observed count: 25 rows. The scratch dataset contains 60 rows."
+    },
+    "expect": "draft",
+    "check": "The draft shows the documented expectation and the actual fixture observation with both source paths.",
+    "next": "Check the option parser and decide whether the next change belongs in the CLI, the docs, or both."
+  },
+  {
+    "id": "21",
+    "title": "Check a disputed date before writing",
+    "files": {
+      "board-minutes.md": "Board minutes, p. 4: The board voted on 6 March 2024. The recorded motion set an effective date of 1 April 2024.",
+      "timeline-note.txt": "Timeline notes: The draft chronology says the policy began 6 March 2024. That date came from the board meeting heading."
+    },
+    "expect": "draft",
+    "check": "Find both source paths and both dates in the draft. The excerpts preserve the difference between the vote and the effective date.",
+    "next": "Write two separate timeline entries in your own working document. Cite the minutes page beside the effective date."
+  },
+  {
+    "id": "22",
+    "title": "Pause a quotation with unresolved consent",
+    "files": {
+      "interview-summary.md": "Interview summary: The volunteer described a four-week pilot. The public recap can state the dates from the event calendar.",
+      "quote-permission.txt": "Publish the named quotation from interview R03 in the recap. Consent to quote by name is still pending."
+    },
+    "expect": "review_required",
+    "check": "The draft contains the interview summary and lists quote-permission.txt as held. Open the review payload to see the matched term publish.",
+    "next": "For the fixture, reject the named quote with a note recording that consent is pending. Use the summary to draft a version without the quotation."
+  },
+  {
+    "id": "23",
+    "title": "Carry a chart's denominator into its caption",
+    "files": {
+      "caption-sketch.md": "Figure 2 caption sketch: 18 submissions met the Friday target. The reader needs a denominator and the period covered.",
+      "chart-tally.json": "{\"figure\":2,\"count_on_time\":18,\"eligible\":24,\"excluded_missing_timestamp\":3,\"period\":\"April\"}"
+    },
+    "expect": "draft",
+    "check": "The caption sketch and the tally appear under separate source paths. The JSON appears as source text, with 18, 24, and the exclusion count visible.",
+    "next": "Write a caption that says 18 of 24 eligible submissions met the target in April. Add the timestamp exclusion to the figure note."
+  },
+  {
+    "id": "24",
+    "title": "Keep a translation decision beside its context",
+    "files": {
+      "interface-context.txt": "Context: This Spanish label opens a saved work session. A person sees it on the home screen after closing the app the previous day.",
+      "translation-decision.md": "Terminology decision: Prefer Retomar for this control. It fits the available width and pairs with the help phrase Retomar una sesión anterior."
+    },
+    "expect": "draft",
+    "check": "The draft preserves both source paths and the accented text. The context and the chosen wording remain available for comparison.",
+    "next": "Read the label and help phrase aloud in the prototype. Record any wording change in the terminology decision file."
+  },
+  {
+    "id": "25",
+    "title": "Separate an observation from its explanation",
+    "files": {
+      "bench-observation.md": "Bench notes: Bottle B lost 7 g in 24 hours. Bottles A and C lost 2 g each. All three readings used the same scale.",
+      "hypothesis.txt": "Working hypothesis: Bottle B had a loose cap. The cap position was unrecorded. Repeat the measurement after checking each cap."
+    },
+    "expect": "draft",
+    "check": "The observation and hypothesis appear under their own filenames. The draft preserves the measurements and the missing observation.",
+    "next": "Carry both into the lab notebook under distinct headings, and make the cap check the first step of the repeat."
+  },
+  {
+    "id": "26",
+    "title": "Prepare a student handout before its answer key",
+    "files": {
+      "student-handout.md": "Classroom brief: Compare the two source dates and explain what each date records. Cite the line that supports each answer.",
+      "answer-key.txt": "Upload the answer key to the class folder on Friday after the exercise. Key: The meeting date and the policy start date are separate events."
+    },
+    "expect": "review_required",
+    "check": "The student handout has a draft excerpt. The answer key has a held path and a review payload with upload as the matched term.",
+    "next": "Open the handout excerpt for today's preparation. Review the answer-key source and verify the timing before making a drafting decision."
+  },
+  {
+    "id": "27",
+    "title": "Catch a private field in a methods note",
+    "files": {
+      "reproduction-method.md": "Methods summary: Start the example server locally and use the three public sample rows. Record elapsed time for each row.",
+      "environment-note.txt": "Methods appendix: The access token field in the configuration example needs a placeholder. This fixture contains a field name only."
+    },
+    "expect": "blocked",
+    "check": "Review lists the environment note as blocked because access token is a configured term. The clean methods excerpt still appears in the draft.",
+    "next": "For the fixture, revise the environment note to say Use the placeholder for the protected configuration field, then rerun. Compare the new draft and review list."
+  },
+  {
+    "id": "28",
+    "title": "Explain a hold on a quoted instruction",
+    "files": {
+      "lesson-context.md": "Lesson context: Learners are analyzing how the sample dialog describes its consequence. The activity uses a paper mockup.",
+      "quoted-dialog.txt": "The mock dialog says ‘Delete the sample row.’ Ask learners which noun the verb refers to and where the affected row is identified."
+    },
+    "expect": "review_required",
+    "check": "The lesson context drafts and the quoted dialog is held. The review payload shows that the literal delete match triggered the hold.",
+    "next": "Approve the fixture for local drafting with a note that the instruction is a quotation in a paper exercise. Run the printed next command and find the review reference in the draft."
+  },
+  {
+    "id": "29",
+    "title": "Pair an accessibility requirement with a test task",
+    "files": {
+      "keyboard-requirement.md": "Requirements: Every panel can be reached using the keyboard. Focus returns to the opener after the panel closes.",
+      "reader-task.txt": "Test task: Start at the example page heading. Reach the help panel, read the first instruction, close the panel, and record where focus lands."
+    },
+    "expect": "draft",
+    "check": "The requirement and the test task appear under separate source paths. These excerpts give the reviewer a criterion and an observable result.",
+    "next": "Try the task manually on a local prototype. Add a third note with the browser, the actual focus destination, and the outcome."
+  },
+  {
+    "id": "30",
+    "title": "Calibrate a rubric with two sample responses",
+    "files": {
+      "rubric.md": "Rubric notes: Award one point for identifying a source and one point for explaining how a specific detail supports the claim.",
+      "response-a.txt": "Sample A: The attendance sheet lists 18 people, which supports the claim that the room was over half full because capacity was 30.",
+      "response-b.txt": "Sample B: The attendance sheet is my source. I think the room was busy."
+    },
+    "expect": "draft",
+    "check": "The rubric and both answers appear under separate filenames. Compare the different kinds of support each answer supplies.",
+    "next": "Score both responses by hand, then save the reason for each score in a separate rubric decision note."
+  },
+  {
+    "id": "31",
+    "title": "Record a move-in meter handover",
+    "files": {
+      "meter-readings.json": "{\"summary\":\"Move-in readings\",\"electric_kwh\":217,\"water_m3\":41,\"observed\":\"2026-10-01 09:20\"}",
+      "handover-notes.md": "# Handover notes\nElectric panel is in the hall cupboard. The water reading includes the three red digits in the photo. The form asks for whole cubic metres."
+    },
+    "expect": "draft",
+    "check": "Look for both source paths in draft.md. The reading values and the form instruction appear as separate excerpts.",
+    "next": "Check each value against its original photo before filling in the move-in form."
+  },
+  {
+    "id": "32",
+    "title": "Prepare a warranty packet",
+    "files": {
+      "warranty-facts.md": "# Warranty context\nDesk fan stopped on speed two after ten minutes. Label reads FICT-210. Receipt date is 2026-08-14.",
+      "portal-step.txt": "Upload the receipt and serial label photo to the warranty portal."
+    },
+    "expect": "review_required",
+    "check": "Inspect the review for portal-step.txt and look for upload in its matched reasons. The facts have their own source path.",
+    "next": "Use the symptom and date in your local draft. Open the receipt and crop unrelated details before using the warranty portal yourself."
+  },
+  {
+    "id": "33",
+    "title": "Reconcile emergency supply counts",
+    "files": {
+      "hall-cupboard.md": "# Hall cupboard notes\nSaturday count found four flashlight batteries on the top shelf. Two packs were open.",
+      "camping-bin.md": "# Camping bin notes\nSunday count found three flashlight batteries. One carried the hall cupboard sticker."
+    },
+    "expect": "draft",
+    "check": "Find the two dated counts under their original source paths. The draft preserves the possible overlap in the notes.",
+    "next": "Check the sticker and count the batteries again before writing a single verified total."
+  },
+  {
+    "id": "34",
+    "title": "Bring a symptom timeline to a repair visit",
+    "files": {
+      "printer-morning.txt": "Repair notes, 08:10. Page one printed normally. Page two had a stripe along the left edge. Plain paper from tray one.",
+      "printer-afternoon.txt": "Repair notes, 16:25. The same page printed cleanly from the manual tray. I left both sheets next to the printer."
+    },
+    "expect": "draft",
+    "check": "Find both time-stamped excerpts in the draft and use the headings to locate the original notes.",
+    "next": "Bring the two paper samples and the draft to the repair visit. Ask the technician to reproduce the difference between trays."
+  },
+  {
+    "id": "35",
+    "title": "Keep login details out of a device handover",
+    "files": {
+      "tablet-basics.md": "# Tablet context\nCharging cable is in the side pocket. Wi-Fi is already set up. The calendar icon is on the first screen.",
+      "tablet-login.txt": "Put the tablet password on the handover card. Placeholder text for this fixture."
+    },
+    "expect": "blocked",
+    "check": "Open the blocked review and check the source path tablet-login.txt. Its matched reason is password and the fixture uses placeholder text.",
+    "next": "Reject the fixture request and keep the practical tablet notes. Decide privately how the recipient should sign in."
+  },
+  {
+    "id": "36",
+    "title": "Make a voiceover pickup sheet",
+    "files": {
+      "take-three.md": "# Take three notes\n00:41 The door closes before the line ends. The word 'tonight' is clear.",
+      "pickup-list.md": "# Pickup notes\nAt 00:41 repeat 'I'll be back tonight' twice. Leave two seconds of silence before each read. Keep the same mic distance."
+    },
+    "expect": "draft",
+    "check": "Find the recorded take note and the pickup instruction under their own paths. Both carry the 00:41 cue.",
+    "next": "Use the pickup excerpt at the mic and keep the take note beside the edit timeline."
+  },
+  {
+    "id": "37",
+    "title": "Catch a prop continuity conflict",
+    "files": {
+      "scene-04.md": "# Scene 4 notes\nLena leaves the brass key inside the blue teapot before the doorbell.",
+      "scene-09.md": "# Scene 9 notes\nLena finds the brass key in the sugar bowl and realizes someone has been in the kitchen."
+    },
+    "expect": "draft",
+    "check": "Find both key locations under their scene paths. The conflict is visible in the two excerpts.",
+    "next": "Decide whether a scene should show the key changing places, then update the relevant source scene."
+  },
+  {
+    "id": "38",
+    "title": "Review the request to list a cover",
+    "files": {
+      "cover-review.md": "# Cover brief\nUse the cream title at thumbnail size. The alternate crop keeps the top of the window in frame. The photo credit is still open.",
+      "listing-step.txt": "Upload the current cover to the public listing."
+    },
+    "expect": "review_required",
+    "check": "Inspect the upload review for listing-step.txt. Compare that path with the cover brief that supplies the open photo-credit question.",
+    "next": "Check the photo credit and compare both crops before deciding what to put on a listing in your own tools."
+  },
+  {
+    "id": "39",
+    "title": "Assemble a tactile prop build card",
+    "files": {
+      "prop-measurements.json": "{\"notes\":\"Door plate mock-up\",\"width_mm\":94,\"height_mm\":31,\"screw_spacing_mm\":70}",
+      "prop-materials.md": "# Build notes\nCut the mock-up from cardstock. Round the top corners. Rub chalk across the raised lettering before the rehearsal."
+    },
+    "expect": "draft",
+    "check": "The draft includes the JSON dimensions as text and the materials as a separate excerpt. Both headings identify their sources.",
+    "next": "Check the dimensions against the set and copy the verified measurements onto the build card."
+  },
+  {
+    "id": "40",
+    "title": "Review a request to discard raw takes",
+    "files": {
+      "take-index.md": "# Audio context\nTake 2 has the only clean room tone. Take 4 is the line used in the current rough cut.",
+      "storage-step.txt": "Delete all raw takes after exporting the rough cut."
+    },
+    "expect": "review_required",
+    "check": "Find storage-step.txt in review with delete as a matched reason. Use take-index.md to see which audio the proposed cleanup would affect.",
+    "next": "Reject the fixture cleanup with a note about the room tone. Keep the takes you still need in your editing workspace."
+  },
+  {
+    "id": "41",
+    "title": "Run the same inbox twice",
+    "files": {
+      "stable.md": "Context: The sample index opens in the same tab. Preserve this checkpoint for comparison."
+    },
+    "expect": "draft",
+    "check": "Record the draft path and its single source section.",
+    "next": "In the example shell, run looping-box run again without changing the source. Compare the skipped count and the saved draft."
+  },
+  {
+    "id": "42",
+    "title": "Turn a skipped duplicate into a new source",
+    "files": {
+      "copy-a.txt": "Notes: The fixture opens at the table of contents.",
+      "copy-b.txt": "Notes: The fixture opens at the table of contents."
+    },
+    "expect": "draft",
+    "check": "The two files have identical bytes. Look for one drafted excerpt and an ingestion skip.",
+    "next": "Add a distinct observation to the skipped copy and run again. Look for the changed source in the new draft."
+  },
+  {
+    "id": "43",
+    "title": "Clarify an accidental hold in the source",
+    "files": {
+      "wording.md": "Task: Remove the second line from the sample caption."
+    },
+    "expect": "review_required",
+    "check": "The configured word remove holds the whole source, even though the fixture describes a harmless copy edit.",
+    "next": "In the sample file, change the line to ‘Task: Shorten the sample caption to one line.’ Run again and confirm the hold clears."
+  },
+  {
+    "id": "44",
+    "title": "Withdraw an obsolete request from the inbox",
+    "files": {
+      "obsolete.txt": "Publish the superseded sample outline."
+    },
+    "expect": "review_required",
+    "check": "The request appears in the review list with a source path.",
+    "next": "Remove only inbox/obsolete.txt from this disposable workspace. Run again and compare the pending list with the retained review file in staging/reviews."
+  },
+  {
+    "id": "45",
+    "title": "Pick up a recorded approval after an interruption",
+    "files": {
+      "approved-note.txt": "Upload the fictional cover mockup after reviewing the contrast at thumbnail size."
+    },
+    "expect": "review_required",
+    "check": "Look for upload in the review payload and confirm the excerpt is held.",
+    "next": "Approve the fixture for local drafting and pause before running the next pass. Check status, then run the printed command. Compare the review ID in the new draft with the signed decision."
+  },
+  {
+    "id": "46",
+    "title": "Record why a request stayed out",
+    "files": {
+      "declined.txt": "Send the retired rehearsal notes to the full list."
+    },
+    "expect": "review_required",
+    "check": "The request is waiting on a decision and its text has not entered the draft.",
+    "next": "Reject the sample using the steps below and the note ‘Outdated rehearsal notes.’ Run again, then check report for the decision and the draft for the held excerpt."
+  },
+  {
+    "id": "47",
+    "title": "Compare two review classes side by side",
+    "files": {
+      "ordinary.txt": "Publish the fictional event outline.",
+      "restricted.txt": "Production plan for the fictional event outline."
+    },
+    "expect": "blocked",
+    "check": "review list shows review_required for publish and blocked for production.",
+    "next": "Open both payloads and compare the matched terms. Leave the blocked item pending while you explain the different classes."
+  },
+  {
+    "id": "48",
+    "title": "Check what happens when a held source changes",
+    "files": {
+      "versioned.md": "Send revision A of the fictional venue map."
+    },
+    "expect": "review_required",
+    "check": "Save the initial review ID before touching the fixture.",
+    "next": "Change revision A to revision B in the source and run again. Compare the new ID and current excerpt with the original review. Use the current ID for any decision."
+  },
+  {
+    "id": "49",
+    "title": "Remove a source before making the next draft",
+    "files": {
+      "retired.md": "Notes: Layout A uses a left-side index.",
+      "current.md": "Notes: Layout B uses a top index."
+    },
+    "expect": "draft",
+    "check": "The initial draft gives both layouts their own source sections.",
+    "next": "Remove inbox/retired.md only in this workspace and add a new note about layout B. Run again and check which source headings appear in the new draft."
+  },
+  {
+    "id": "50",
+    "title": "Inspect a context plan before writing anything else",
+    "files": {
+      "queue.md": "Context: The first pass recorded the location of the sample work."
+    },
+    "expect": "draft",
+    "check": "The first run leaves an ordinary draft and a context package.",
+    "next": "Add a second short note. Run looping-box phase1, then looping-box worker context_builder --dry-run. Read the planned context artifact paths and check that the draft is still the first version. Then run looping-box supervisor --once and find the second note."
+  }
+]

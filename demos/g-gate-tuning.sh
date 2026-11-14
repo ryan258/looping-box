@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Section G winner: gate tuning as a service. Measure on a client's incidents, tune, re-measure.
 set -euo pipefail
-export DEMO_NAME=g
 source "$(dirname "${BASH_SOURCE[0]}")/../demo-env.sh"
 demo_reset
 

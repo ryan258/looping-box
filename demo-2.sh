@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
-# Demo 2 — "It stops on risky action language." (the money demo)
-# Drops a file with real-world action language and shows the boundary gate
-# hold it for a human.
+# Demo 2 — A configured term holds a source for review.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/demo-env.sh"
 demo_reset
 
-echo "DEMO 2: Risky work is HELD until a human decides."
+echo "DEMO 2: A configured term holds a source for review."
 echo "------------------------------------------------------------"
-echo "Dropping a file that asks to deploy and send things..."
-echo "Please deploy the release and send the announcement email." > "${LOOPING_BOX_ROOT}/inbox/release.txt"
+echo "Adding a sample file containing 'deploy' and 'send'."
+demo_add_held_release
 
-echo "Running the loop..."
+echo "Running one offline pass."
 echo
-startday
+startday 2
 
 echo
 echo "------------------------------------------------------------"
-echo "It stopped at the BOUNDARY GATE. Nothing is deployed or sent: this tool"
-echo "never performs outward actions, it only holds them for a person."
-echo "Here is what is now waiting for a human decision:"
+echo "Held for review. The list shows the review ID and the saved record."
 echo
 lb review list
 
 echo
-echo "------------------------------------------------------------"
-echo "That item stays flagged on every run until a person approves or rejects it."
+echo "Source path and matched terms:"
+demo_holds
+echo "A review decision controls whether this source can enter drafting."
+echo "Sending and deploying happen separately in your own tools."

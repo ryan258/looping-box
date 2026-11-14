@@ -1,39 +1,32 @@
 #!/usr/bin/env bash
-# Demo 3 — "The human gives the green light."
-# Takes the item that Demo 2 left waiting, approves it with a note, and shows
-# the item released into the pipeline. Run ./demo-2.sh first.
+# Demo 3 — A scripted fixture decision releases a source into drafting.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/demo-env.sh"
+demo_reset
 
-echo "DEMO 3: A human approves the held item and it is released."
+echo "DEMO 3: Approve a held source for drafting."
 echo "------------------------------------------------------------"
 
-REVIEW_ID="$(lb review list | head -1 | cut -d' ' -f1 || true)"
-if [ -z "${REVIEW_ID}" ]; then
-  echo "Nothing is waiting for review. Run ./demo-2.sh first, then try again."
-  exit 0
-fi
+demo_add_held_release
+startday 2
+REVIEW_ID="$(demo_review_id release.txt)"
 
 echo "Found the item waiting for a decision: ${REVIEW_ID}"
 echo
-echo "What is being asked (the full record a reviewer would read):"
+echo "Review details, including the source and matched terms:"
 lb review show "${REVIEW_ID}"
 
 echo
-echo "A person approves it, leaving a note for the record."
-echo "(Approvals normally need an interactive terminal; the demo opts out explicitly.)"
-if LOOPING_BOX_ALLOW_NONINTERACTIVE=1 lb review approve "${REVIEW_ID}" --note "Checked with the team, good to go"; then
-  echo
-  echo "Running the loop one more time..."
-  echo
-  startday
-  echo
-  echo "------------------------------------------------------------"
-  echo "It now reads 'review=clear' and the approved item was processed once."
-  echo "The decision is HMAC-signed with the approver's name, and the audit log is"
-  echo "hash-chained: ${LOOPING_BOX_ROOT}/logs/transactions/review.jsonl"
-else
-  echo
-  echo "------------------------------------------------------------"
-  echo "The approval was DECLINED (see the message above). The item stays held."
-fi
+echo "Recording a scripted fixture approval with a note."
+echo "See Demo 3 in docs/sales-demos.md for the interactive prompt."
+approve "${REVIEW_ID}" --note "Reviewed the fixture for local drafting"
+echo "Running the default next step with the CLI from this checkout."
+startday 0
+
+echo
+draft="${LOOPING_BOX_ROOT}/cache/workers/execution_engine/draft.md"
+echo "Draft saved: ${draft}"
+cat "${draft}"
+echo "Signed decision: ${LOOPING_BOX_ROOT}/staging/approvals/${REVIEW_ID}.json"
+echo "Hash-linked review log: ${LOOPING_BOX_ROOT}/logs/transactions/review.jsonl"
+echo "Sending and deploying happen separately in your own tools."

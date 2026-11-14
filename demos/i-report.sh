@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Section I winner: `looping-box report`, the quarterly "what did we hold" summary (was a roadmap item).
 set -euo pipefail
-export DEMO_NAME=i
-export LOOPING_BOX_APPROVER=ryan
+export DEMO_APPROVER=demo-reviewer
 source "$(dirname "${BASH_SOURCE[0]}")/../demo-env.sh"
 demo_reset
 
@@ -13,10 +12,10 @@ echo "Docs summary for the week." > "${IN}/week.md"
 echo "Please deploy the hotfix." > "${IN}/hotfix.md"
 echo "Delete the old backups." > "${IN}/backups.md"
 echo "Send the pricing email." > "${IN}/pricing.md"
-startday
+startday 2
 approve "$(demo_review_id hotfix)" --note "Reviewed with Sam" >/dev/null
 reject "$(demo_review_id backups)" --note "Legal hold, keep them" >/dev/null
-startday
+startday 2
 
 say_step "looping-box report"
 lb report
