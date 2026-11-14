@@ -7,10 +7,12 @@ import fnmatch
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from . import model
-from ._util import audit_log_paths, default_root, inspect_audit_log, key_status, review_key
+from ._util import (
+    audit_destination_writable, audit_log_paths, default_root, inspect_audit_log, key_status,
+    missing_review_audit_events, review_key,
+)
 from .locking import is_held
 from .action_policy import _read_action_config
 from .review import list_reviews
@@ -153,11 +155,8 @@ def run_doctor(root: Path | str) -> list[Finding]:
         enabled = [role for role in ("context_builder", "execution_engine", "verifier")
                    if settings.get("OPENROUTER_API_KEY") and settings.get("MODEL_" + role.upper())]
         ok(f"model roles enabled: {', '.join(enabled)}" if enabled else "model roles: none (fully offline)")
-        endpoint = urlsplit(settings.get("OPENROUTER_BASE_URL", model.DEFAULT_BASE_URL))
-        _ = endpoint.port  # Validate an explicit port without contacting the endpoint.
-        if endpoint.scheme not in {"http", "https"} or not endpoint.hostname:
-            fail("configured endpoint is not an HTTP(S) URL", "fix OPENROUTER_BASE_URL; doctor never contacts it")
-        elif endpoint.scheme != "https":
+        endpoint = model.parse_base_url(settings.get("OPENROUTER_BASE_URL", model.DEFAULT_BASE_URL))
+        if endpoint.scheme != "https":
             warn("configured HTTP endpoint is not HTTPS", "use HTTPS for provider traffic; endpoint was not contacted")
         else:
             ok("HTTPS model endpoint configured (not contacted)")
@@ -166,7 +165,8 @@ def run_doctor(root: Path | str) -> list[Finding]:
     except (OSError, ValueError) as exc:
         fail(f"model settings unavailable: {exc}", "inspect .env and endpoint configuration")
     try:
-        logs = {path.name: inspect_audit_log(path) for path in audit_log_paths(root_path)}
+        paths = audit_log_paths(root_path)
+        logs = {path.name: inspect_audit_log(path) for path in paths}
         broken = {name: log.broken_at for name, log in logs.items() if log.broken_at is not None}
         if broken:
             fail(f"audit chain broken: {broken}", "preserve and inspect/restore the logs; do not silently rewrite history")
@@ -174,6 +174,16 @@ def run_doctor(root: Path | str) -> list[Finding]:
             ok("audit: no activity evidence (logs absent or empty)")
         else:
             ok(f"audit logs intact ({len(logs)} file(s))")
+        for reference in missing_review_audit_events(root_path, logs.get("review.jsonl")):
+            fail(f"audit_incomplete: missing review event for {reference}", "preserve and inspect the decision and review audit log")
+        targets = set(paths)
+        targets.update(root_path / "logs/transactions" / f"{name}.jsonl" for name in ("phase1", "supervisor", "review"))
+        for path in sorted(targets):
+            try:
+                if not audit_destination_writable(path):
+                    raise PermissionError(f"{path}: file or parent directory is unwritable")
+            except (OSError, UnsafePathError) as exc:
+                fail(f"cannot append audit log: {exc}", "check permissions and keep a regular file with exactly one link")
     except UnsafePathError:
         raise
     except (OSError, ValueError) as exc:

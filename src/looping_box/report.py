@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ._util import audit_log_paths, default_root, inspect_audit_log, resolve_under_root, utc_now
+from ._util import audit_log_paths, default_root, inspect_audit_log, missing_review_audit_events, resolve_under_root, utc_now
 from .review import list_reviews
 from .validation import ValidationError, validate_data
 
@@ -75,6 +75,12 @@ def report_result(root: Path | str, *, since: str = "") -> ReportResult:
             logs[path.name] = inspect_audit_log(path)
         except (OSError, ValueError) as exc:
             errors[path.name] = str(exc)
+    missing_review_events = []
+    if "audit directory" not in errors and "review.jsonl" not in errors:
+        try:
+            missing_review_events = missing_review_audit_events(root_path, logs.get("review.jsonl"))
+        except (OSError, ValueError) as exc:
+            errors["review audit coverage"] = str(exc)
     try:
         pending: int | None = len(list_reviews(root_path))
         pending_error = None
@@ -122,11 +128,13 @@ def report_result(root: Path | str, *, since: str = "") -> ReportResult:
         lines.append(f"- {_cell(name)}: {status}")
     for name, error in errors.items():
         lines.append(f"- {_cell(name)}: unavailable ({_cell(error)})")
+    for reference in missing_review_events:
+        lines.append(f"- audit_incomplete: missing review event for {_cell(reference)}")
     lines += ["", "Integrity covers full logs regardless of the period filter. Hash chains cannot detect complete recomputation, valid-suffix removal, or deletion of all logs."]
-    failed = bool(errors or pending_error or any(log.broken_at is not None for log in logs.values()))
-    if errors or any(log.broken_at is not None for log in logs.values()):
+    audit_failed = bool(errors or missing_review_events or any(log.broken_at is not None for log in logs.values()))
+    if audit_failed:
         lines.append("Next: preserve and inspect/restore audit evidence; do not rewrite history to clear the warning.")
-    return ReportResult("\n".join(lines) + "\n", failed)
+    return ReportResult("\n".join(lines) + "\n", audit_failed or pending_error is not None)
 
 
 def build_report(root: Path | str, *, since: str = "") -> str:

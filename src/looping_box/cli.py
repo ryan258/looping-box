@@ -16,6 +16,7 @@ USAGE = """usage: looping-box <command> [args]
   run [--root R]        ingest the inbox, then one supervisor pass (what ./startday.sh does)
   status                supervisor status, including live pending reviews
   review [--root R] <sub>  list | show | approve | reject | key | audit
+                           Approval makes the item eligible for local drafting only.
   worker <id>           run one worker pass (context_builder | execution_engine)
   doctor                read-only health check with remedies
   report [--since D]    audit logs and decisions as one markdown summary
