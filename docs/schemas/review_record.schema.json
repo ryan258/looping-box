@@ -21,10 +21,21 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
+  "dependentRequired": {
+    "audit_binds_record": [
+      "audit_expected"
+    ]
+  },
   "properties": {
     "approver": {
       "pattern": "\\S",
       "type": "string"
+    },
+    "audit_binds_record": {
+      "const": true
+    },
+    "audit_expected": {
+      "const": true
     },
     "decision": {
       "enum": [
@@ -63,6 +74,9 @@
           "type": "null"
         }
       ]
+    },
+    "verifier_sha256": {
+      "$ref": "#/$defs/Hash"
     }
   },
   "required": [

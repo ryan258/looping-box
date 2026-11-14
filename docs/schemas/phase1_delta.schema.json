@@ -135,6 +135,28 @@
     "Skip": {
       "additionalProperties": true,
       "properties": {
+        "current": {
+          "additionalProperties": true,
+          "properties": {
+            "approved_review": {
+              "$ref": "#/$defs/ReviewID"
+            },
+            "excerpt": {
+              "type": "string"
+            },
+            "matched_routes": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "matched_routes",
+            "excerpt"
+          ],
+          "type": "object"
+        },
         "reason": {
           "enum": [
             "already_processed",
@@ -219,6 +241,13 @@
         "input_dir"
       ],
       "type": "object"
+    },
+    "prior_rejection_signatures": {
+      "items": {
+        "$ref": "#/$defs/Hash"
+      },
+      "type": "array",
+      "uniqueItems": true
     },
     "reconciliation": {
       "additionalProperties": true,

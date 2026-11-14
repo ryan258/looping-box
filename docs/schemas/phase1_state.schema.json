@@ -82,6 +82,19 @@
     "ProcessedFile": {
       "additionalProperties": true,
       "properties": {
+        "last_released_review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_review_release": {
+          "$ref": "#/$defs/ReviewID"
+        },
         "processed_at": {
           "$ref": "#/$defs/Timestamp"
         },
@@ -100,6 +113,10 @@
       ],
       "type": "object"
     },
+    "ReviewID": {
+      "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
+      "type": "string"
+    },
     "Timestamp": {
       "format": "date-time",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
@@ -109,6 +126,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
   "properties": {
+    "custom_delta_dirs": {
+      "items": {
+        "$ref": "#/$defs/Path"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
     "last_delta_path": {
       "anyOf": [
         {
@@ -151,6 +175,20 @@
         "$ref": "#/$defs/IngestionRun"
       },
       "type": "array"
+    },
+    "same_time_delta_order": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/Path"
+        },
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": true
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/Timestamp"
+      },
+      "type": "object"
     },
     "schema": {
       "const": "looping-box.phase1.state.v1"

@@ -34,6 +34,9 @@
         },
         "source_delta": {
           "$ref": "#/$defs/Path"
+        },
+        "source_sop": {
+          "$ref": "#/$defs/SourceSop"
         }
       },
       "required": [
@@ -70,6 +73,9 @@
         },
         "source_delta": {
           "$ref": "#/$defs/Path"
+        },
+        "source_sop": {
+          "$ref": "#/$defs/SourceSop"
         }
       },
       "required": [
@@ -92,6 +98,26 @@
     "ReviewID": {
       "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
       "type": "string"
+    },
+    "SourceSop": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/Path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "name"
+      ],
+      "type": "object"
     },
     "Timestamp": {
       "format": "date-time",

@@ -34,6 +34,9 @@
     "last_context_sha256": {
       "$ref": "#/$defs/Hash"
     },
+    "last_draft_sha256": {
+      "$ref": "#/$defs/Hash"
+    },
     "last_model": {
       "anyOf": [
         {
@@ -46,6 +49,9 @@
     },
     "last_run_at": {
       "$ref": "#/$defs/Timestamp"
+    },
+    "retired_context_sha256": {
+      "$ref": "#/$defs/Hash"
     },
     "schema": {
       "const": "looping-box.worker.state.v1"

@@ -64,6 +64,26 @@
       "pattern": "^review-[0-9a-f]{16}(?![\\s\\S])",
       "type": "string"
     },
+    "SourceSop": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/Path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "name"
+      ],
+      "type": "object"
+    },
     "Timestamp": {
       "format": "date-time",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z(?![\\s\\S])",
@@ -103,6 +123,9 @@
     "source": {
       "const": "phase1"
     },
+    "source_evidence_sha256": {
+      "$ref": "#/$defs/Hash"
+    },
     "source_items": {
       "items": {
         "$ref": "#/$defs/Change"
@@ -110,6 +133,9 @@
       "maxItems": 1,
       "minItems": 1,
       "type": "array"
+    },
+    "source_sop": {
+      "$ref": "#/$defs/SourceSop"
     },
     "suggested_verification": {
       "items": {

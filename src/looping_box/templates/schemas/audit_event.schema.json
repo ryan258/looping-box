@@ -181,6 +181,9 @@
           },
           "review_id": {
             "$ref": "#/$defs/ReviewID"
+          },
+          "review_record_sha256": {
+            "$ref": "#/$defs/Hash"
           }
         },
         "required": [
@@ -220,6 +223,9 @@
           },
           "review_id": {
             "$ref": "#/$defs/ReviewID"
+          },
+          "review_record_sha256": {
+            "$ref": "#/$defs/Hash"
           }
         },
         "required": [
