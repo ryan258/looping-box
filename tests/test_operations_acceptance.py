@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from looping_box import _util, cli, doctor, model, phase1, report, scaffold, supervisor
+from looping_box import _util, cli, doctor, model, phase1, report, review, scaffold, supervisor
 from looping_box.validation import ValidationError
 from looping_box.paths import UnsafePathError
 
@@ -110,17 +110,133 @@ class OperationsAcceptanceTests(unittest.TestCase):
 
     def test_a26_append_does_not_hide_write_errors(self):
         path = self.chain()
-        original = Path.open
+        original = os.open
 
-        def denied(target, mode="r", *args, **kwargs):
-            if target == path and mode == "a":
+        def denied(target, flags, *args, **kwargs):
+            if target == path and flags & os.O_APPEND:
                 raise PermissionError("fixture audit write denied")
-            return original(target, mode, *args, **kwargs)
+            return original(target, flags, *args, **kwargs)
 
         before = path.read_bytes()
-        with patch.object(Path, "open", new=denied), self.assertRaises(PermissionError):
+        with patch.object(os, "open", new=denied), self.assertRaises(PermissionError):
             _util.append_audit(self.root, "phase1", self.event())
         self.assertEqual(path.read_bytes(), before)
+
+    def test_shared_audit_inode_is_rejected_before_ingestion(self):
+        path = self.chain()
+        outside = self.base / "outside-audit.jsonl"
+        path.replace(outside)
+        os.link(outside, path)
+        before = outside.read_bytes()
+        (self.root / "inbox/note.md").write_text("Project docs")
+        with self.assertRaisesRegex(UnsafePathError, "audit log.*exactly one link"):
+            phase1.run_phase1(self.root, now=STAMP)
+        self.assertFalse((self.root / "cache/state/phase1_state.json").exists())
+        self.assertEqual(outside.read_bytes(), before)
+
+    def test_audit_append_checks_the_open_inode(self):
+        path = self.root / "logs/transactions/phase1.jsonl"
+        outside = self.base / "outside-audit.jsonl"
+        outside.write_bytes(b"outside evidence\n")
+        original = os.open
+
+        def link_on_open(target, flags, *args, **kwargs):
+            if target == path and flags & os.O_APPEND:
+                os.link(outside, path)
+            return original(target, flags, *args, **kwargs)
+
+        with patch.object(os, "open", new=link_on_open), \
+                self.assertRaisesRegex(UnsafePathError, "audit log.*exactly one link"):
+            _util.append_audit(self.root, "phase1", self.event())
+        self.assertEqual(outside.read_bytes(), b"outside evidence\n")
+
+    def test_doctor_reports_shared_audit_inode_without_changing_evidence(self):
+        path = self.chain()
+        backup = self.base / "backup-audit.jsonl"
+        os.link(path, backup)
+        before = self.snapshot()
+        code, text = self.command("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot append audit log", text)
+        self.assertIn("exactly one link", text)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(path.stat().st_ino, backup.stat().st_ino)
+        self.assertEqual(self.command("review", "audit")[0], 0)
+
+    def test_missing_review_audit_remains_visible_after_archival_and_period_filter(self):
+        self.ingest("Please deploy this release.")
+        rid = review.list_reviews(self.root)[0]["review_id"]
+        active = self.root / "staging/approvals" / f"{rid}.json"
+        with patch.object(review, "_append_review_audit", side_effect=OSError("fixture append failed")), \
+                self.assertRaisesRegex(review.ReviewDecisionIncomplete, "fixture append failed"):
+            review.record_review(self.root, rid, "approved", note="approved local drafting", now=STAMP)
+        record = json.loads(active.read_bytes())
+        self.assertTrue(record["audit_expected"])
+        self.assertIn(active.name, self.command("review", "audit")[1])
+
+        sop_path = self.root / "config/sops/phase1_ingestion.json"
+        sop = json.loads(sop_path.read_bytes())
+        sop["max_excerpt_chars"] = 8
+        sop_path.write_text(json.dumps(sop))
+        phase1.run_phase1(self.root, now="2026-10-03T12:01:00Z")
+        archived, = (self.root / "staging/archive").glob(f"{rid}-*.approval.json")
+        self.assertFalse(active.exists())
+
+        # A valid event for the same review with different evidence does not fill the gap.
+        event = _util.review_audit_event(record)
+        _util.append_audit(self.root, "review", {**event, "note": "different decision evidence"})
+        before = self.snapshot()
+        for args in (("review", "audit"), ("doctor",), ("report", "--since", "2099")):
+            with self.subTest(command=args):
+                code, text = self.command(*args)
+                self.assertEqual(code, 1)
+                self.assertIn("audit_incomplete", text)
+                self.assertIn(archived.name, text)
+        self.assertEqual(self.snapshot(), before)
+
+        _util.append_audit(self.root, "review", event)
+        for args in (("review", "audit"), ("doctor",), ("report", "--since", "2099")):
+            self.assertEqual(self.command(*args)[0], 0)
+
+    def test_legacy_unmarked_decisions_and_malformed_archives_do_not_require_events(self):
+        self.ingest("Please deploy this release.")
+        rid = review.list_reviews(self.root)[0]["review_id"]
+        active = self.root / "staging/rejections" / f"{rid}.json"
+        record = review.record_review(self.root, rid, "rejected", note="local fixture", now=STAMP)
+        record.pop("audit_binds_record")
+        record["signature"] = _util.sign_record(record, os.environ["LOOPING_BOX_REVIEW_KEY"].encode())
+        _util.write_json(active, record)
+        self.assertEqual(self.command("review", "audit")[0], 1)
+        _util.append_audit(self.root, "review", _util.review_audit_event(record))
+        self.assertEqual(self.command("review", "audit")[0], 0)
+
+        record.pop("audit_expected")
+        record["signature"] = _util.sign_record(record, os.environ["LOOPING_BOX_REVIEW_KEY"].encode())
+        _util.write_json(active, record)
+        (self.root / "logs/transactions/review.jsonl").unlink()
+        archive = self.root / "staging/archive"
+        archive.mkdir(exist_ok=True)
+        raw = b"{broken"
+        (archive / f"{rid}-{hashlib.sha256(raw).hexdigest()}.approval.json").write_bytes(raw)
+        for args in (("review", "audit"), ("doctor",), ("report",)):
+            self.assertEqual(self.command(*args)[0], 0)
+
+    def test_broken_audit_stops_ingestion_and_supervisor_before_local_changes(self):
+        (self.root / "inbox/one.txt").write_text("Please deploy this release.")
+        for log, command in (("phase1", ("phase1",)), ("supervisor", ("supervisor", "--once"))):
+            with self.subTest(log=log):
+                path = self.root / f"logs/transactions/{log}.jsonl"
+                path.write_text("{broken\n")
+                lock = (self.root / ".looping_box.lock").relative_to(self.base).as_posix()
+                before = {name: info for name, info in self.snapshot().items() if name != lock}
+                code, text = self.command(*command)
+                self.assertEqual(code, 1)
+                self.assertIn("audit_invalid", text)
+                self.assertEqual({name: info for name, info in self.snapshot().items() if name != lock}, before)
+                path.unlink()
+                if log == "phase1":
+                    self.ingest()
+        self.assertEqual(supervisor.run_supervisor(self.root, now=STAMP)["status"], "complete")
 
     def test_a28_literal_broken_note_and_html_remain_text_with_exit_zero(self):
         note = "BROKEN at line 1 | <script>x</script>\nsecond\rline & tail"
@@ -265,6 +381,18 @@ class OperationsAcceptanceTests(unittest.TestCase):
         self.assertNotIn(str(self.root), model._env_loaded_for)
         os.environ["MODEL_EXECUTION_ENGINE"] = ""
         self.assertIn("model roles: none", self.command("doctor")[1])
+
+    def test_doctor_validates_same_endpoint_forms_as_transport(self):
+        for endpoint, expected in (
+            ("HTTPS://example.invalid/api/v1", 0),
+            ("https://example.invalid/v1?option=1", 1),
+            ("https://example.invalid/v1#fragment", 1),
+            ("https://operator:password@example.invalid/v1", 1),
+        ):
+            with self.subTest(endpoint=endpoint), patch.dict(os.environ, {"OPENROUTER_BASE_URL": endpoint}):
+                code, text = self.command("doctor")
+                self.assertEqual(code, expected)
+                self.assertNotIn("operator:password", text)
 
     def test_a27_invalid_endpoint_and_required_artifacts_fail(self):
         for value in ("file:///tmp/private", "https://host:bad/v1", "https://"):

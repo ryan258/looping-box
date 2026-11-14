@@ -62,7 +62,6 @@ class OutageDoesNotLoseABatchTests(unittest.TestCase):
         env = {"OPENROUTER_API_KEY": "k", "MODEL_EXECUTION_ENGINE": "v/m"}
         with patch.dict(os.environ, env), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            model._env_loaded_for.add(str(root.resolve()))
             _make_sop(root)
             (root / "inbox" / "a.md").write_text("docs a", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")
@@ -250,24 +249,16 @@ class FileCountLimitTests(unittest.TestCase):
 
 class ModelLayerLimitTests(unittest.TestCase):
     def test_env_file_only_sets_model_layer_variables(self):
-        with patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, clear=True), tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ".env").write_text(
                 "LOOPING_BOX_APPROVER=evil\nexport MODEL_VERIFIER=v/j\nOPENROUTER_API_KEY=k\n", encoding="utf-8"
             )
-            os.environ.pop("LOOPING_BOX_APPROVER", None)
-            model._env_loaded_for.discard(str(Path(tmp).resolve()))
-
-            model.load_env(tmp)
-
-            self.assertNotIn("LOOPING_BOX_APPROVER", os.environ)
-            self.assertEqual(os.environ["MODEL_VERIFIER"], "v/j")
-            os.environ.pop("MODEL_VERIFIER")
-            os.environ.pop("OPENROUTER_API_KEY")
+            self.assertEqual(model.load_env(tmp), {"MODEL_VERIFIER": "v/j", "OPENROUTER_API_KEY": "k"})
+            self.assertEqual(dict(os.environ), {})
 
     def test_non_http_base_url_is_refused(self):
         env = {"OPENROUTER_API_KEY": "k", "MODEL_VERIFIER": "v/m", "OPENROUTER_BASE_URL": "file:///etc"}
         with patch.dict(os.environ, env), tempfile.TemporaryDirectory() as tmp:
-            model._env_loaded_for.add(str(Path(tmp).resolve()))
             with self.assertRaises(model.ModelError):
                 model.complete("verifier", "hi", root=tmp)
 
@@ -276,7 +267,6 @@ class ModelLayerLimitTests(unittest.TestCase):
         body = json.dumps({"error": {"message": "rate limited"}})
         with patch.dict(os.environ, env), tempfile.TemporaryDirectory() as tmp, \
                 patch.object(model, "_transport", lambda *a: body):
-            model._env_loaded_for.add(str(Path(tmp).resolve()))
             with self.assertRaisesRegex(model.ModelError, "rate limited"):
                 model.complete("verifier", "hi", root=tmp)
 

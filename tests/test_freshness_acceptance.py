@@ -1,4 +1,5 @@
 """T07 / A17–A21: current evidence before disclosure, bounded offline model stubs."""
+import hashlib
 import json
 import os
 import sys
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from looping_box import model, phase1, review, scaffold, worker
+from looping_box import model, phase1, review, scaffold, supervisor, worker
 from looping_box.eligibility import SourceReingestRequired
 from looping_box.validation import validate_data
 
@@ -122,6 +123,398 @@ class FreshnessAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.run_worker()["status"], "complete")
         self.assertEqual([x["excerpt"] for x in self.package()["items"]], ["Project docs replacement."])
 
+    def test_reingested_skip_refreshes_only_existing_undrafted_item(self):
+        self.seed()
+        sop_path = self.root / "config/sops/phase1_ingestion.json"
+        sop = json.loads(sop_path.read_text())
+        sop["max_excerpt_chars"] = 10
+        sop_path.write_text(json.dumps(sop))
+        self.assertEqual(self.run_worker()["errors"][-1]["code"], "source_reingest_required")
+        scanned = phase1.run_phase1(self.root, now=STAMP)
+        self.assertEqual(scanned["changes"], [])
+        self.assertEqual(self.run_worker()["status"], "complete")
+        self.assertEqual([item["excerpt"] for item in self.package()["items"]], ["Project..."])
+        self.assertEqual(self.run_worker("execution_engine")["status"], "complete")
+        prior_context, prior_draft = self.saved("context_builder"), self.saved()
+        phase1.run_phase1(self.root, now=STAMP)
+        self.assertEqual(self.run_worker()["status"], "idle")
+        self.assertEqual(self.saved("context_builder")["context_package.json"], prior_context["context_package.json"])
+        self.assertEqual(self.run_worker("execution_engine")["status"], "idle")
+        self.assertEqual(self.saved(), prior_draft)
+
+    def test_refreshing_skip_carries_the_current_sop_even_if_excerpt_is_unchanged(self):
+        source = self.root / "inbox/one.txt"
+        source.write_text("Project docs one.")
+        custom_reference = "config/sops/custom.json"
+        (self.root / custom_reference).write_bytes(
+            (self.root / "config/sops/phase1_ingestion.json").read_bytes()
+        )
+        custom_delta = phase1.run_phase1(self.root, now=STAMP, sop_path=custom_reference)
+        self.assertEqual(self.run_worker()["status"], "complete")
+        self.assertEqual(self.package()["items"][0]["source_sop"], custom_delta["sop"])
+
+        default_delta = phase1.run_phase1(self.root, now=STAMP)
+        self.assertEqual(default_delta["changes"], [])
+        self.assertEqual(self.run_worker()["status"], "complete")
+        item = self.package()["items"][0]
+        self.assertNotIn("source_sop", item)
+        self.assertEqual(item["source_delta"], custom_delta["delta_path"])
+        self.assertEqual(self.run_worker("execution_engine")["status"], "complete")
+
+    def prepare_permissive_context(self):
+        config = self.root / "config/sops"
+        permissive = json.loads((config / "phase1_ingestion.json").read_text())
+        restrictive = json.loads(json.dumps(permissive))
+        permissive["boundary_gate"]["requires_review_keywords"].remove("deploy")
+        for name in ("phase1_ingestion", "permissive"):
+            (config / f"{name}.json").write_text(json.dumps(permissive))
+        (config / "restrictive.json").write_text(json.dumps(restrictive))
+        (self.root / "inbox/one.txt").write_text("Please deploy this release.")
+        phase1.run_phase1(self.root, now=STAMP, sop_path="config/sops/permissive.json")
+        self.assertEqual(self.run_worker()["status"], "complete")
+
+    def test_direct_execution_rejects_newer_hold_or_rejection_from_other_sop(self):
+        for newer_evidence in ("held", "rejected", "archived", "corrupt", "custom_delta_dir", "aged_out"):
+            with self.subTest(newer_evidence=newer_evidence):
+                self.new_workspace()
+                self.prepare_permissive_context()
+                prior = self.saved()
+
+                delta_dir = "a" if newer_evidence in {"custom_delta_dir", "aged_out"} else "cache/deltas"
+                later = STAMP if newer_evidence == "custom_delta_dir" else "2026-10-13T12:01:00Z"
+                settings = dict(now=later, sop_path="config/sops/restrictive.json", delta_dir=delta_dir)
+                held = phase1.run_phase1(self.root, **settings)
+                if newer_evidence != "held":
+                    rid = review.list_reviews(self.root)[0]["review_id"]
+                    review.record_review(self.root, rid, "rejected", note="Reject fixture", now=later)
+                    rejected = phase1.run_phase1(self.root, **settings) if newer_evidence != "custom_delta_dir" else None
+                    self.assertEqual(review.list_reviews(self.root), [])
+                    if newer_evidence in {"archived", "aged_out"}:
+                        archive = self.root / delta_dir / "archive"
+                        archive.mkdir()
+                        for delta in (held, rejected):
+                            path = self.root / delta["delta_path"]
+                            path.replace(archive / path.name)
+                    if newer_evidence == "corrupt":
+                        (self.root / held["delta_path"]).write_text("{unreadable newer authority")
+                    if newer_evidence == "aged_out":
+                        state_path = self.root / "cache/state/phase1_state.json"
+                        legacy = json.loads(state_path.read_text())
+                        legacy.pop("custom_delta_dirs")
+                        state_path.write_text(json.dumps(legacy))
+                        for _ in range(51):
+                            phase1.run_phase1(self.root, input_dir="spare", now=later)
+                        state = json.loads(state_path.read_text())
+                        self.assertEqual(state["custom_delta_dirs"], ["a"])
+                        self.assertTrue(all(run["delta_path"] is None for run in state["runs"]))
+                self.enable()
+                with patch.object(model, "_transport") as transport:
+                    output = self.run_worker("execution_engine")
+                self.assertEqual(output["status"], "failed")
+                self.assertEqual(output["errors"][0]["code"], "source_reingest_required")
+                self.assertEqual(self.saved(), prior)
+                transport.assert_not_called()
+                os.environ.pop("MODEL_EXECUTION_ENGINE")
+
+    def archive_rejected_hold(self, stamp=STAMP, **options):
+        hold = phase1.run_phase1(self.root, now=stamp, sop_path="config/sops/restrictive.json",
+                                 delta_dir="alternate/deltas", **options)
+        review_id = review.list_reviews(self.root)[0]["review_id"]
+        review.record_review(self.root, review_id, "rejected", note="Reject fixture", now=stamp)
+        path = self.root / hold["delta_path"]
+        archive = path.parent / "archive"
+        archive.mkdir()
+        path.replace(archive / path.name)
+
+    def test_policy_refresh_skip_does_not_reauthorize_archived_rejection(self):
+        for retry_at in (STAMP, "2026-10-13T12:01:00Z"):
+            with self.subTest(retry_at=retry_at):
+                self.new_workspace()
+                self.prepare_permissive_context()
+                self.archive_rejected_hold()
+                retry = phase1.run_phase1(self.root, now=retry_at)
+                self.assertEqual(retry["changes"], [])
+                self.assertEqual(retry["skipped"][0]["reason"], "already_processed")
+                with patch.dict(os.environ):
+                    self.enable("context_builder", "stub/context")
+                    self.enable()
+                    with patch.object(model, "_transport") as transport:
+                        self.assertEqual(self.run_worker("execution_engine")["status"], "failed")
+                        self.assertEqual(supervisor.run_supervisor(self.root, now=retry_at)["status"], "complete")
+                        transport.assert_not_called()
+                self.assertEqual(self.package()["items"], [])
+
+    def test_archived_veto_allows_unrelated_work_and_matches_dry_run(self):
+        self.prepare_permissive_context()
+        # Build the prior context under the default SOP, so the retry cannot
+        # hide the veto behind a policy/provenance change.
+        phase1.run_phase1(self.root, now=STAMP)
+        self.assertEqual(self.run_worker()["status"], "complete")
+        self.archive_rejected_hold()
+        self.ingest("clean.txt", "Project docs unrelated safe sibling.", now="2026-10-13T12:01:00Z")
+        with patch.dict(os.environ):
+            self.enable("context_builder", "stub/context")
+            self.enable()
+            before = self.saved("context_builder")
+            with patch.object(model, "_transport") as transport:
+                preview = self.run_worker(dry_run=True)
+                transport.assert_not_called()
+            self.assertEqual(self.saved("context_builder"), before)
+            with self.transport("OFFLINE DRAFT"):
+                result = supervisor.run_supervisor(self.root, now=STAMP)
+        self.assertEqual(preview["status"], result["worker_outputs"][0]["status"])
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual([item["relative_path"] for item in self.package()["items"]], ["inbox/clean.txt"])
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn("Please deploy this release.", json.dumps(self.calls))
+
+    def test_context_dry_run_fails_on_unreadable_newer_archive_evidence(self):
+        self.prepare_permissive_context()
+        self.archive_rejected_hold("2026-10-13T12:01:00Z")
+        archive = self.root / "alternate/deltas/archive"
+        next(archive.glob("*.json")).write_text("{broken archived delta")
+        self.ingest("clean.txt", "Project docs unrelated safe sibling.", now="2026-10-13T12:02:00Z")
+        before = self.saved("context_builder")
+        with patch.object(model, "_transport") as transport:
+            preview = self.run_worker(dry_run=True)
+            self.assertEqual(self.saved("context_builder"), before)
+            actual = self.run_worker()
+            transport.assert_not_called()
+        for output in (preview, actual):
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(output["errors"][0]["code"], "source_reingest_required")
+
+    def test_unregistered_legacy_rejection_blocks_direct_execution(self):
+        self.prepare_permissive_context()
+        self.archive_rejected_hold("2026-10-13T12:01:00Z", state_path="alternate/state.json")
+        state_path = self.root / "cache/state/phase1_state.json"
+        legacy = json.loads(state_path.read_text())
+        del legacy["custom_delta_dirs"]
+        legacy.pop("same_time_delta_order", None)
+        state_path.write_text(json.dumps(legacy))
+        self.enable()
+        with patch.object(model, "_transport") as transport:
+            out = self.run_worker("execution_engine")
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["errors"][0]["code"], "source_reingest_required")
+        transport.assert_not_called()
+
+    def test_late_rejection_vetoes_partially_published_clean_delta(self):
+        for reject_at in ("2026-10-13T11:59:59Z", STAMP, "2026-10-13T12:01:00Z"):
+            with self.subTest(reject_at=reject_at):
+                self.new_workspace()
+                default_sop = self.root / "config/sops/phase1_ingestion.json"
+                restrictive_sop = default_sop.with_name("restrictive.json")
+                restrictive_sop.write_bytes(default_sop.read_bytes())
+                sop = json.loads(default_sop.read_bytes())
+                sop["boundary_gate"]["requires_review_keywords"].remove("deploy")
+                default_sop.write_text(json.dumps(sop))
+                (self.root / "inbox/one.txt").write_text("Please deploy this release.")
+                hold = phase1.run_phase1(self.root, now=STAMP, sop_path="config/sops/restrictive.json",
+                                         delta_dir="alternate/deltas")
+                path = self.root / hold["delta_path"]
+                archive = path.parent / "archive"
+                archive.mkdir()
+                path.replace(archive / path.name)
+                write_json = phase1._write_json
+
+                def fail_pending_index(path, data, write=write_json):
+                    if path.name == "pending_review.json":
+                        raise OSError("interrupted pending-index write")
+                    return write(path, data)
+
+                with patch.object(phase1, "_write_json", side_effect=fail_pending_index):
+                    with self.assertRaisesRegex(OSError, "interrupted pending-index write"):
+                        phase1.run_phase1(self.root, now=STAMP)
+                self.assertTrue(list((self.root / "cache/deltas").glob("*.json")))
+                review_id = review.list_reviews(self.root)[0]["review_id"]
+                review.record_review(self.root, review_id, "rejected", note="Late rejection", now=reject_at)
+                with patch.dict(os.environ):
+                    self.enable("context_builder", "stub/context")
+                    self.enable()
+                    with patch.object(model, "_transport") as transport:
+                        self.assertEqual(supervisor.run_supervisor(self.root, now=reject_at)["status"], "complete")
+                        transport.assert_not_called()
+                self.assertEqual(self.package()["items"], [])
+
+    def test_alternate_hold_authority_survives_state_write_failures_and_custom_state(self):
+        for state_write in ("registration", "final", "custom"):
+            with self.subTest(state_write=state_write):
+                self.new_workspace()
+                self.prepare_permissive_context()
+                canonical = self.root / "cache/state/phase1_state.json"
+                previous = json.loads(canonical.read_text())
+                settings = {"now": "2026-10-13T12:01:00Z", "sop_path": "config/sops/restrictive.json",
+                            "delta_dir": "alternate/deltas"}
+                original = phase1._write_json
+
+                def interrupt(path, data, *, target=canonical, stamp=settings["now"],
+                              fail_final=state_write == "final", write_json=original):
+                    advances_run = data.get("last_run_at") == stamp
+                    if path == target and advances_run == fail_final:
+                        raise OSError("fixture state write failure")
+                    return write_json(path, data)
+
+                if state_write == "custom":
+                    # Registration must preserve legacy optional fields and canonical run history.
+                    previous.pop("present_paths")
+                    canonical.write_text(json.dumps(previous))
+                    phase1.run_phase1(self.root, state_path="alternate/state.json", **settings)
+                else:
+                    with patch.object(phase1, "_write_json", side_effect=interrupt):
+                        with self.assertRaisesRegex(OSError, "state write failure"):
+                            phase1.run_phase1(self.root, **settings)
+
+                canonical_state = json.loads(canonical.read_text())
+                if state_write == "registration":
+                    self.assertEqual(canonical_state, previous)
+                    self.assertEqual(review.list_reviews(self.root), [])
+                    self.assertEqual(list((self.root / settings["delta_dir"]).glob("*.json")), [])
+                    continue
+                self.assertEqual(canonical_state.pop("custom_delta_dirs"), [settings["delta_dir"]])
+                published, = (self.root / settings["delta_dir"]).glob("*.json")
+                self.assertEqual(canonical_state.pop("same_time_delta_order"),
+                                 {settings["now"]: [published.relative_to(self.root).as_posix()]})
+                self.assertEqual(canonical_state, previous)
+                pending = review.list_reviews(self.root)[0]
+                review.record_review(self.root, pending["review_id"], "rejected", note="Reject fixture",
+                                     now=settings["now"])
+                self.assertEqual(review.list_reviews(self.root), [])
+                prior = self.saved()
+                with patch.dict(os.environ):
+                    self.enable()
+                    with patch.object(model, "_transport") as transport:
+                        output = self.run_worker("execution_engine")
+                self.assertEqual(output["status"], "failed")
+                self.assertEqual(output["errors"][0]["code"], "source_reingest_required")
+                self.assertEqual(self.saved(), prior)
+                transport.assert_not_called()
+
+    def test_same_second_custom_queue_retries_preserve_the_committed_draft(self):
+        for legacy_order in (False, True):
+            with self.subTest(legacy_order=legacy_order):
+                self.new_workspace()
+                sop = self.root / "config/sops/phase1_ingestion.json"
+                restrictive = json.loads(sop.read_text())
+                (sop.parent / "restrictive.json").write_text(json.dumps(restrictive))
+                restrictive["boundary_gate"]["requires_review_keywords"].remove("deploy")
+                sop.write_text(json.dumps(restrictive))
+                (self.root / "inbox/one.txt").write_text("Please deploy this release.")
+                hold = phase1.run_phase1(self.root, now=STAMP, sop_path="config/sops/restrictive.json",
+                                         delta_dir="alternate/deltas", state_path="alternate/state.json")
+                rid = review.list_reviews(self.root)[0]["review_id"]
+                review.record_review(self.root, rid, "rejected", note="Reject fixture", now=STAMP)
+                origin = phase1.run_phase1(self.root, now=STAMP)
+                self.assertEqual(supervisor.run_supervisor(self.root, now=STAMP)["status"], "complete")
+                before = self.saved()
+                before_context = self.saved("context_builder")
+                later = "2026-10-13T12:02:00Z"
+                for _ in range(51):
+                    phase1.run_phase1(self.root, input_dir="spare", now=later)
+                state_path = self.root / "cache/state/phase1_state.json"
+                state = json.loads(state_path.read_text())
+                self.assertEqual(state["same_time_delta_order"][STAMP], [hold["delta_path"], origin["delta_path"]])
+                self.assertTrue(all(run["delta_path"] is None for run in state["runs"]))
+                if legacy_order:
+                    state.pop("same_time_delta_order")
+                    state_path.write_text(json.dumps(state))
+                    direct = self.run_worker("execution_engine")
+                    self.assertEqual(direct["status"], "failed")
+                    self.assertIn("cannot order same-time scans", direct["errors"][0]["message"])
+
+                retry = phase1.run_phase1(self.root, now="2026-10-13T12:03:00Z")
+                self.assertEqual(retry["skipped"][0]["reason"], "already_processed")
+                with patch.object(model, "generate_if_enabled") as generate:
+                    self.assertEqual(supervisor.run_supervisor(self.root, now=later)["status"], "idle")
+                    self.assertFalse(worker.execution_needs_run(self.root))
+                    generate.assert_not_called()
+                self.assertEqual(self.saved(), before)
+                context = self.saved("context_builder")
+                self.assertEqual(context["context_package.json"], before_context["context_package.json"])
+                self.assertEqual(context["context_package.md"], before_context["context_package.md"])
+                self.assertEqual(bool(json.loads(context["state.json"]).get("retired_context_sha256")), legacy_order)
+                self.assertFalse((self.root / retry["delta_path"]).exists())
+                if legacy_order:
+                    with patch.dict(os.environ):
+                        self.enable()
+                        with patch.object(model, "_transport") as transport:
+                            self.assertEqual(self.run_worker("execution_engine")["status"], "idle")
+                            transport.assert_not_called()
+                        self.ingest(text="Project docs updated.", now="2026-10-13T12:04:00Z")
+                        with self.transport(self.batch("one.txt")):
+                            self.assertEqual(supervisor.run_supervisor(self.root, now=later)["status"], "complete")
+                    self.assertEqual(len(self.calls), 1)
+                    self.assertNotIn("retired_context_sha256", json.loads(self.saved("context_builder")["state.json"]))
+
+    def test_failed_same_second_order_reservation_cannot_move_retry_before_the_context(self):
+        self.prepare_permissive_context()
+        before = self.saved()
+        alternate = {"now": STAMP, "sop_path": "config/sops/restrictive.json", "delta_dir": "alternate/deltas"}
+        write_json = phase1._write_json
+
+        def fail_delta(path, data):
+            if path.parent == self.root / alternate["delta_dir"]:
+                raise OSError("fixture delta publication failure")
+            return write_json(path, data)
+
+        with patch.object(phase1, "_write_json", side_effect=fail_delta):
+            with self.assertRaisesRegex(OSError, "delta publication failure"):
+                phase1.run_phase1(self.root, **alternate)
+        (self.root / "inbox/one.txt").write_text("Please deploy the updated release.")
+        origin = phase1.run_phase1(self.root, now=STAMP)
+        self.assertEqual(self.run_worker()["status"], "complete")
+        self.assertEqual(self.package()["items"][0]["source_delta"], origin["delta_path"])
+        hold = phase1.run_phase1(self.root, **alternate)
+        self.assertTrue(hold["run_id"].endswith("-2"))
+        rid = review.list_reviews(self.root)[0]["review_id"]
+        review.record_review(self.root, rid, "rejected", note="Reject fixture", now=STAMP)
+        with patch.object(model, "generate_if_enabled") as generate:
+            output = self.run_worker("execution_engine")
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(output["errors"][0]["code"], "source_reingest_required")
+            generate.assert_not_called()
+        self.assertEqual(self.saved(), before)
+
+    def test_legacy_unordered_veto_is_retired_without_redisclosing_saved_context(self):
+        sop = self.root / "config/sops/phase1_ingestion.json"
+        restrictive = json.loads(sop.read_text())
+        (sop.parent / "restrictive.json").write_text(json.dumps(restrictive))
+        restrictive["boundary_gate"]["requires_review_keywords"].remove("deploy")
+        sop.write_text(json.dumps(restrictive))
+        self.ingest(text="Please deploy this release.")
+        self.assertEqual(supervisor.run_supervisor(self.root, now=STAMP)["status"], "complete")
+        prior = self.saved()
+
+        phase1.run_phase1(self.root, now=STAMP, sop_path="config/sops/restrictive.json", delta_dir="alternate/deltas")
+        rid = review.list_reviews(self.root)[0]["review_id"]
+        review.record_review(self.root, rid, "rejected", note="Reject fixture", now=STAMP)
+        later = "2026-10-13T12:02:00Z"
+        for _ in range(51):
+            phase1.run_phase1(self.root, input_dir="spare", now=later)
+        state_path = self.root / "cache/state/phase1_state.json"
+        state = json.loads(state_path.read_text())
+        state.pop("same_time_delta_order")
+        state_path.write_text(json.dumps(state))
+
+        self.enable()
+        with patch.object(model, "_transport") as transport:
+            self.assertEqual(self.run_worker("execution_engine")["status"], "failed")
+            phase1.run_phase1(self.root, now="2026-10-13T12:03:00Z")
+            self.assertEqual(supervisor.run_supervisor(self.root, now=later)["status"], "idle")
+            self.assertEqual(self.run_worker("execution_engine")["status"], "idle")
+            transport.assert_not_called()
+        self.assertEqual(self.saved(), prior)
+
+    def test_duplicate_edit_supersedes_stale_undrafted_content(self):
+        self.seed()
+        duplicate = "Project docs second source."
+        self.ingest("two.txt", duplicate)
+        result = self.ingest(text=duplicate)
+        self.assertEqual(result["changes"], [])
+        self.assertEqual(self.run_worker()["status"], "complete")
+        self.assertEqual([item["relative_path"] for item in self.package()["items"]], ["inbox/two.txt"])
+        self.assertEqual(self.run_worker("execution_engine")["status"], "complete")
+
     def test_new_hold_suppresses_queued_and_carried_clean_content(self):
         for carry in (False, True):
             self.new_workspace()
@@ -218,6 +611,54 @@ class FreshnessAcceptanceTests(unittest.TestCase):
         with patch.object(model, "generate_if_enabled") as generate:
             output = self.run_worker("execution_engine")
         self.assertEqual(output["status"], "failed"); generate.assert_not_called()
+
+    def test_execution_context_digest_tracks_the_bytes_that_were_parsed(self):
+        self.seed()
+        path = self.root / "cache/workers/context_builder/context_package.json"
+        package = self.package()
+        package["generated_at"] = "2026-10-13T12:01:00Z"
+        replacement = json.dumps(package).encode("utf-8")
+        original_read = worker.read_validated_snapshot
+
+        def replace_after_read(source, kind, **options):
+            snapshot = original_read(source, kind, **options)
+            if kind == "context_package":
+                path.write_bytes(replacement)
+            return snapshot
+
+        before = self.saved()
+        with patch.object(worker, "read_validated_snapshot", side_effect=replace_after_read):
+            output = self.run_worker("execution_engine")
+        self.assertEqual(output["status"], "failed")
+        self.assertEqual(output["errors"][0]["code"], "source_reingest_required")
+        self.assertEqual(self.saved(), before)
+
+        self.assertEqual(self.run_worker("execution_engine")["status"], "complete")
+        saved = self.saved()
+        expected = hashlib.sha256(replacement).hexdigest()
+        self.assertEqual(json.loads(saved["draft.json"])["source_context_sha256"], expected)
+        self.assertEqual(json.loads(saved["state.json"])["last_context_sha256"], expected)
+
+    def test_changes_during_model_calls_preserve_published_worker_artifacts(self):
+        for role in ("context_builder", "execution_engine"):
+            with self.subTest(role=role):
+                self.new_workspace()
+                self.seed(execute=True)
+                if role == "context_builder":
+                    self.ingest(text="Project docs updated.")
+                self.enable(role)
+                prior = self.saved(role)
+
+                def hold_during_request(_request):
+                    (self.root / "inbox/one.txt").write_text("Please deploy now.")
+                    return "stale response"
+
+                with self.transport(hold_during_request):
+                    output = self.run_worker(role)
+                self.assertEqual(output["status"], "failed")
+                self.assertEqual(output["errors"][0]["code"], "source_reingest_required")
+                self.assertEqual(self.saved(role), prior)
+                os.environ.pop("MODEL_" + role.upper())
 
     def test_model_id_invalidates_but_api_key_does_not(self):
         self.seed(execute=True)
@@ -362,12 +803,70 @@ class FreshnessAcceptanceTests(unittest.TestCase):
                          json.dumps({"choices": [{"message": {"content": None}}]}),
                          json.dumps({"choices": [{"message": {"content": 12}}]}),
                          json.dumps({"choices": [{"message": {"content": "\ud800"}}]}),
+                         json.dumps({"model": "\ud800", "choices": [{"message": {"content": "text"}}]}),
                          json.dumps({"model": None, "choices": [{"message": {"content": "text"}}]})):
             with patch.object(model, "_transport", return_value=response) as transport:
                 output = self.run_worker("execution_engine")
             self.assertEqual(output["status"], "failed")
             self.assertEqual(output["errors"][0]["code"], "model_error")
             self.assertEqual(self.saved(), prior); transport.assert_called_once()
+
+    def test_decoded_batch_rejects_echoed_key_and_invalid_unicode_before_writes(self):
+        self.seed(count=2, execute=True)
+        self.enable()
+        prior = self.saved()
+        history = self.root / "cache/workers/execution_engine/history"
+        history_before = sorted(history.glob("*"))
+        for value in (KEY, "\ud800"):
+            content = json.dumps({"drafts": [
+                {"relative_path": "inbox/one.txt", "draft": value},
+                {"relative_path": "inbox/two.txt", "draft": "fixture draft"},
+            ]})
+            if value == KEY:
+                content = content.replace(KEY, f"\\u{ord(KEY[0]):04x}{KEY[1:]}")
+            with self.subTest(value=value), self.transport(content):
+                output = self.run_worker("execution_engine")
+                self.assertEqual(output["status"], "failed")
+                self.assertEqual(output["errors"][0]["code"], "model_error")
+                self.assertNotIn(KEY, output["errors"][0]["message"])
+                self.assertEqual(self.saved(), prior)
+                self.assertEqual(sorted(history.glob("*")), history_before)
+
+    def test_decoded_batch_rejects_the_sent_key_after_key_rotation(self):
+        self.seed(count=2, execute=True)
+        self.enable()
+        prior = self.saved()
+        content = json.dumps({"drafts": [
+            {"relative_path": "inbox/one.txt", "draft": KEY},
+            {"relative_path": "inbox/two.txt", "draft": "fixture draft"},
+        ]}).replace(KEY, f"\\u{ord(KEY[0]):04x}{KEY[1:]}")
+
+        def rotate_key(_request):
+            os.environ["OPENROUTER_API_KEY"] = "rotated-fixture-key"
+            return content
+
+        with self.transport(rotate_key):
+            output = self.run_worker("execution_engine")
+        self.assertEqual(output["status"], "failed")
+        self.assertEqual(output["errors"][0]["code"], "model_error")
+        self.assertNotIn(KEY, json.dumps(output))
+        self.assertEqual(self.saved(), prior)
+
+    def test_configured_credential_in_model_id_is_rejected_even_when_disabled(self):
+        self.seed(execute=True)
+        before = self.saved()
+        (self.root / ".env").write_text(f"OPENROUTER_API_KEY={KEY}\nMODEL_EXECUTION_ENGINE={KEY}\n")
+        model._env_loaded_for.clear()
+        for disabled in (False, True):
+            with self.subTest(disabled=disabled), patch.dict(
+                os.environ, {"OPENROUTER_API_KEY": "" if disabled else KEY}
+            ), patch.object(model, "_transport") as transport:
+                output = self.run_worker("execution_engine")
+            transport.assert_not_called()
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(output["errors"][0]["code"], "model_error")
+            self.assertNotIn(KEY, json.dumps(output))
+            self.assertEqual(self.saved(), before)
 
     def test_disabled_roles_and_env_overrides_do_not_grant_authority(self):
         (self.root / ".env").write_text("LOOPING_BOX_REVIEW_KEY=forged\nLOOPING_BOX_ALLOW_NONINTERACTIVE=1\nMODEL_EXECUTION_ENGINE=stub/from-env\n")
@@ -380,9 +879,8 @@ class FreshnessAcceptanceTests(unittest.TestCase):
         self.assertNotIn("LOOPING_BOX_ALLOW_NONINTERACTIVE", os.environ)
         os.environ["MODEL_EXECUTION_ENGINE"] = "stub/process-wins"
         os.environ["OPENROUTER_API_KEY"] = KEY
-        model._env_loaded_for.clear(); model.load_env(self.root)
-        self.assertEqual(model.model_for("execution_engine"), "stub/process-wins")
-        os.environ.pop("MODEL_EXECUTION_ENGINE")
+        self.assertEqual(model.model_for("execution_engine", root=self.root), "stub/process-wins")
+        os.environ["MODEL_EXECUTION_ENGINE"] = ""
         with patch.object(model, "_transport") as transport:
             self.assertIsNone(model.generate_if_enabled("execution_engine", "fixture", root=self.root))
             transport.assert_not_called()

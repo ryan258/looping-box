@@ -276,7 +276,6 @@ class PipelineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            model._env_loaded_for.add(str(root.resolve()))
             _make_sop(root)
             (root / "inbox" / "a.md").write_text("docs note", encoding="utf-8")
             run_phase1(root, now="2026-06-24T12:00:00Z")

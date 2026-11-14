@@ -249,7 +249,8 @@ class WorkerIntakeAcceptanceTests(unittest.TestCase):
             (directory / names[0]).write_bytes(b"\xff corrupt evidence")
             os.utime(directory / names[0], (1000, 1000))
             worker._archive_previous(directory, names)
-            self.assertEqual((directory / "history" / f"1000-2-{names[0]}").read_bytes(), b"\xff corrupt evidence")
+            archived = "1000-draft.incomplete.json" if wid == "execution_engine" else f"1000-2-{names[0]}"
+            self.assertEqual((directory / "history" / archived).read_bytes(), b"\xff corrupt evidence")
             with self.assertRaises(ValidationError): self.run_worker(wid)
             self.assertEqual((directory / names[0]).read_bytes(), b"\xff corrupt evidence")
 

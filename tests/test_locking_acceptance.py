@@ -15,6 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from looping_box import _util, doctor, locking, model, phase1, review, scaffold, supervisor, worker
+from looping_box.paths import UnsafePathError
 
 STAMP = "2026-10-13T12:00:00Z"
 HOLDER = '''
@@ -111,6 +112,18 @@ class KernelLockTests(unittest.TestCase):
                 self.assertTrue(locking.is_held(self.lock))
             self.assertFalse(locking.is_held(self.lock))
             self.assertEqual(self.lock.stat().st_ino, inode)
+
+    def test_shared_lock_inode_is_rejected_without_truncation(self):
+        outside = self.root.parent / "outside.lock"
+        outside.write_text("outside evidence")
+        self.lock.unlink()
+        os.link(outside, self.lock)
+        with self.assertRaisesRegex(UnsafePathError, "workspace lock.*exactly one link"):
+            phase1.run_phase1(self.root, now=STAMP)
+        with self.assertRaisesRegex(UnsafePathError, "workspace lock.*exactly one link"):
+            locking.is_held(self.lock)
+        self.assertEqual(outside.read_text(), "outside evidence")
+        self.assertEqual(self.lock.stat().st_ino, outside.stat().st_ino)
 
     def test_nested_owner_retains_outer_lock_and_other_thread_is_busy(self):
         failures = []

@@ -1,6 +1,7 @@
 """T05 / A09–A14: offline evidence, source/policy, signed decisions and real TTYs."""
 import hashlib
 import hmac
+import io
 import json
 import os
 import pty
@@ -10,12 +11,13 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from looping_box import _util, doctor, model, phase1, report, review, scaffold, supervisor
+from looping_box import _util, cli, doctor, model, phase1, report, review, scaffold, supervisor
 from looping_box.validation import validate_data
 from looping_box.paths import UnsafePathError
 
@@ -175,6 +177,217 @@ class ReviewAcceptanceTests(unittest.TestCase):
             self.assertFalse((root / f"staging/approvals/{rid}.json").exists())
         self.transport.assert_not_called()
 
+    def test_changes_during_model_review_preserve_pending_evidence(self):
+        for operation in ("approve", "verify"):
+            for change in ("source", "sop", "action_policy", "payload"):
+                with self.subTest(operation=operation, change=change):
+                    root, rid, payload = self.stage()
+                    index_path = root / "staging/pending_review.json"
+                    index_before = index_path.read_bytes()
+                    expected_payload = []
+
+                    def complete(
+                        *args, change=change, root=root, payload=payload, expected_payload=expected_payload, **kwargs
+                    ):
+                        if change == "source":
+                            (root / "inbox/note.md").write_text("please deploy changed source")
+                        elif change == "sop":
+                            path = root / "config/sops/phase1_ingestion.json"
+                            data = json.loads(path.read_text())
+                            data["max_excerpt_chars"] = 3
+                            path.write_text(json.dumps(data))
+                        elif change == "action_policy":
+                            path = root / "config/action_classes.json"
+                            data = json.loads(path.read_text())
+                            data["classes"]["review_required"].remove("deploy")
+                            data["classes"]["forbidden"].append("deploy")
+                            path.write_text(json.dumps(data))
+                        else:
+                            data = json.loads(payload.read_text())
+                            data["notification_message"] = "operator edit during verification"
+                            payload.write_text(json.dumps(data))
+                        expected_payload.append(payload.read_bytes())
+                        return {"model": "offline-stub", "text": "PASS: local drafting"}
+
+                    with patch.object(model, "is_enabled", return_value=True), patch.object(
+                        model, "complete", side_effect=complete
+                    ) as call:
+                        if operation == "approve":
+                            with self.assertRaisesRegex(ValueError, "review_(source_changed|verifier_failed)"):
+                                self.decide(root, rid)
+                        else:
+                            self.assertEqual(review.run_verifier(root, rid, now=STAMP)["status"], "failed")
+                    call.assert_called_once()
+                    verifier = json.loads((root / f"cache/verifiers/{rid}.json").read_text())
+                    self.assertEqual(verifier["status"], "failed")
+                    failed = [check["name"] for check in verifier["checks"] if check["status"] == "failed"]
+                    self.assertEqual(failed, ["payload_unchanged" if change == "payload" else "current_source_after_verification"])
+                    self.assertEqual(payload.read_bytes(), expected_payload[0])
+                    self.assertEqual(index_path.read_bytes(), index_before)
+                    self.assertEqual(review.list_reviews(root)[0]["review_id"], rid)
+                    self.assertFalse((root / f"staging/approvals/{rid}.json").exists())
+        self.transport.assert_not_called()
+
+    def test_payload_edit_after_snapshot_is_preserved(self):
+        root, rid, payload = self.stage()
+        read_snapshot = review._read_review_payload_snapshot
+        data = json.loads(payload.read_text())
+        data["source_items"][0]["excerpt"] = "changed between the parse and the first check"
+        edited = json.dumps(data)
+
+        def read_then_edit(path):
+            snapshot = read_snapshot(path)
+            payload.write_text(edited)
+            return snapshot
+
+        with patch.object(review, "_read_review_payload_snapshot", side_effect=read_then_edit) as read, patch.object(
+            review, "_model_review_check"
+        ) as model_check:
+            with self.assertRaisesRegex(ValueError, "review_verifier_failed"):
+                self.decide(root, rid)
+        read.assert_called_once_with(payload)
+        model_check.assert_not_called()
+        self.assertEqual(payload.read_text(), edited)
+        index = json.loads((root / "staging/pending_review.json").read_text())
+        self.assertIn(payload.relative_to(root).as_posix(), index["reviews"])
+        with self.assertRaisesRegex(ValueError, "review_evidence_invalid"):
+            review.list_reviews(root)
+        self.assertFalse((root / f"staging/approvals/{rid}.json").exists())
+
+    def test_edit_while_confirmation_is_pending_requires_another_confirmation(self):
+        root, rid, payload = self.stage()
+        data = json.loads(payload.read_text())
+        data["notification_message"] = "new notification while the prompt is open"
+        edited = json.dumps(data)
+
+        def confirm(_prompt):
+            payload.write_text(edited)
+            return "approve"
+
+        stderr = io.StringIO()
+        with patch.object(sys.stdin, "isatty", return_value=True), patch("builtins.input", side_effect=confirm):
+            with redirect_stderr(stderr):
+                code = cli.main(self.command(root, rid)[3:])
+        self.assertEqual(code, 1)
+        self.assertIn("review_payload_changed", stderr.getvalue())
+        self.assertEqual(payload.read_text(), edited)
+        self.assertEqual(review.list_reviews(root)[0]["review_id"], rid)
+        self.assertFalse((root / f"staging/approvals/{rid}.json").exists())
+
+    def test_broken_audit_leaves_both_decisions_pending(self):
+        for decision in ("approved", "rejected"):
+            with self.subTest(decision=decision):
+                root, rid, payload = self.stage()
+                index = root / "staging/pending_review.json"
+                before = (payload.read_bytes(), index.read_bytes())
+                audit = root / "logs/transactions/review.jsonl"
+                audit.write_text("broken audit\n")
+                with patch.object(review, "_model_review_check") as model_check:
+                    with self.assertRaisesRegex(ValueError, "audit_invalid"):
+                        self.decide(root, rid, decision)
+                model_check.assert_not_called()
+                self.assertEqual((payload.read_bytes(), index.read_bytes()), before)
+                self.assertEqual(audit.read_text(), "broken audit\n")
+                self.assertEqual(_util.decision_state(root / "staging", rid), (None, False))
+                self.assertFalse((root / f"cache/verifiers/{rid}.json").exists())
+
+    def test_late_audit_failure_reports_recorded_decision_without_resigning(self):
+        root, rid, _ = self.stage()
+        index = root / "staging/pending_review.json"
+        before = index.read_bytes()
+        record = root / f"staging/approvals/{rid}.json"
+        stderr = io.StringIO()
+        with patch.object(sys.stdin, "isatty", return_value=False), patch.dict(
+            os.environ, {"LOOPING_BOX_ALLOW_NONINTERACTIVE": "1"}
+        ), patch.object(review, "_append_review_audit", side_effect=OSError("fixture write error")), redirect_stderr(stderr):
+            code = cli.main(self.command(root, rid)[3:])
+        self.assertEqual(code, 1)
+        self.assertIn("review_decision_recorded_incomplete", stderr.getvalue())
+        self.assertNotIn("declined", stderr.getvalue())
+        self.assertEqual(index.read_bytes(), before)
+        self.assertEqual(_util.decision_state(root / "staging", rid), ("approved", False))
+        signed = record.read_bytes()
+        with self.assertRaisesRegex(ValueError, "review_already_decided"):
+            self.decide(root, rid)
+        with self.assertRaisesRegex(ValueError, "review_already_decided"):
+            review.run_verifier(root, rid, now=STAMP)
+        self.assertEqual(record.read_bytes(), signed)
+
+    def test_same_id_reapproval_retains_prior_decision_and_missing_audit_event(self):
+        root, rid, payload = self.stage()
+        decision = root / f"staging/approvals/{rid}.json"
+        verifier = root / f"cache/verifiers/{rid}.json"
+        with patch.object(review, "_append_review_audit", side_effect=OSError("fixture write error")):
+            with self.assertRaises(review.ReviewDecisionIncomplete):
+                self.decide(root, rid)
+        first_record = decision.read_bytes()
+        result = json.loads(verifier.read_bytes())
+        result["checks"][0]["message"] = "damaged verifier evidence"
+        verifier.write_text(json.dumps(result), encoding="utf-8")
+        previous = {"approval": first_record, "payload": payload.read_bytes(), "verifier": verifier.read_bytes()}
+        phase1.run_phase1(root, now=STAMP)
+        self.assertTrue(review.list_reviews(root)[0]["unverifiable_decision"])
+        with patch.object(review, "_write_bytes", side_effect=OSError("archive unavailable")):
+            with self.assertRaisesRegex(OSError, "archive unavailable"):
+                self.decide(root, rid)
+        self.assertEqual(
+            {"approval": decision.read_bytes(), "payload": payload.read_bytes(), "verifier": verifier.read_bytes()},
+            previous,
+        )
+        self.assertEqual(
+            review.record_review(root, rid, "approved", note="Checked the recovered review", now=STAMP)["decision"],
+            "approved",
+        )
+
+        archive = root / "staging/archive"
+        for kind, data in previous.items():
+            digest = hashlib.sha256(data).hexdigest()
+            self.assertEqual((archive / f"{rid}-{digest}.{kind}.json").read_bytes(), data)
+        self.assertNotEqual(decision.read_bytes(), first_record)
+        self.assertEqual(_util.decision_state(root / "staging", rid), ("approved", False))
+        result = report.report_result(root)
+        self.assertTrue(result.failed)
+        self.assertIn("audit_incomplete", result.text)
+        self.assertIn(f"{rid}-{hashlib.sha256(first_record).hexdigest()}.approval.json", result.text)
+
+    def test_prior_audit_event_cannot_cover_same_payload_with_a_distinct_verifier(self):
+        root, rid, _ = self.stage("Please deploy this release after collecting the documentation.")
+        first_verdict = review._check("model_review", True, "First advisory verifier result")
+        with patch.object(review, "_model_review_check", return_value=first_verdict):
+            first = self.decide(root, rid)
+
+        sop_path = root / "config/sops/phase1_ingestion.json"
+        original_sop = sop_path.read_bytes()
+        revised = json.loads(original_sop)
+        revised["max_excerpt_chars"] = 15
+        sop_path.write_text(json.dumps(revised), encoding="utf-8")
+        phase1.run_phase1(root, now=STAMP)
+        self.assertEqual(len(list((root / "staging/archive").glob(f"{rid}-*.approval.json"))), 1)
+        sop_path.write_bytes(original_sop)
+        phase1.run_phase1(root, now=STAMP)
+
+        second_verdict = review._check("model_review", True, "Second advisory verifier result")
+        with patch.object(review, "_model_review_check", return_value=second_verdict), patch.object(
+            review, "_append_review_audit", side_effect=OSError("fixture write error")
+        ), self.assertRaisesRegex(review.ReviewDecisionIncomplete, "fixture write error"):
+            self.decide(root, rid)
+
+        active = f"staging/approvals/{rid}.json"
+        second = json.loads((root / active).read_bytes())
+        self.assertEqual(first["payload_sha256"], second["payload_sha256"])
+        self.assertNotEqual(first["verifier_sha256"], second["verifier_sha256"])
+        self.assertNotEqual(first["signature"], second["signature"])
+        inspection = _util.inspect_audit_log(root / "logs/transactions/review.jsonl")
+        self.assertEqual(len(inspection.events), 1)
+        self.assertEqual(_util.missing_review_audit_events(root, inspection), [active])
+        result = report.report_result(root)
+        self.assertTrue(result.failed)
+        self.assertIn(active, result.text)
+
+        _util.append_audit(root, "review", _util.review_audit_event(second))
+        self.assertFalse(report.report_result(root).failed)
+        self.transport.assert_not_called()
+
     def test_model_pass_is_advisory_after_current_source_checks(self):
         root, rid, _ = self.stage()
         with patch.object(model, "is_enabled", return_value=True), patch.object(model, "complete", return_value={
@@ -184,6 +397,65 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(record["decision"], "approved")
         self.assertEqual(_util.decision_state(root / "staging", rid), ("approved", False))
         self.transport.assert_not_called()
+
+    def test_custom_sop_preserves_provenance_and_workspace_gate_through_drafting(self):
+        root = self.base / "custom-sop-workspace"
+        scaffold.init_workspace(root)
+        sop_path = "config/sops/custom.json"
+        sop = json.loads((root / "config/sops/phase1_ingestion.json").read_text())
+        sop["max_excerpt_chars"] = 8
+        sop["routes"] = [{"label": "custom-route", "keywords": ["docs"]}]
+        sop["boundary_gate"]["requires_review_keywords"] = []
+        (root / sop_path).write_text(json.dumps(sop), encoding="utf-8")
+        (root / "inbox/clean.md").write_text("Project docs for later", encoding="utf-8")
+        (root / "inbox/held.md").write_text("Deploy the release", encoding="utf-8")
+
+        delta = phase1.run_phase1(root, now=STAMP, sop_path=sop_path)
+        self.assertEqual(delta["boundary_gate"]["status"], "pending_review")
+        rid = review.list_reviews(root)[0]["review_id"]
+        payload = review.show_review(root, rid)
+        self.assertEqual(payload["source_sop"], delta["sop"])
+        self.assertEqual(payload["risk_reasons"], ["deploy"])
+        self.assertEqual(self.decide(root, rid)["decision"], "approved")
+        phase1.run_phase1(root, now=STAMP, sop_path=sop_path)
+        self.assertEqual(supervisor.run_supervisor(root, now=STAMP)["status"], "complete")
+        context = json.loads((root / "cache/workers/context_builder/context_package.json").read_text())
+        self.assertEqual([item["source_sop"] for item in context["items"]], [delta["sop"], delta["sop"]])
+        draft = json.loads((root / "cache/workers/execution_engine/draft.json").read_text())
+        self.assertEqual(
+            [(item["relative_path"], item["matched_routes"], item["draft"]) for item in draft["items"]],
+            [("inbox/clean.md", ["custom-route"], "Proje..."), ("inbox/held.md", [], "Deplo...")],
+        )
+        self.transport.assert_not_called()
+
+    def test_edited_source_evidence_digest_is_refused_before_approval(self):
+        root, rid, payload = self.stage()
+        data = json.loads(payload.read_text())
+        data["source_evidence_sha256"] = "0" * 64
+        payload.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "review_evidence_invalid.*staged source evidence was edited"):
+            self.decide(root, rid)
+        self.assertFalse((root / f"staging/approvals/{rid}.json").exists())
+        self.transport.assert_not_called()
+
+    def test_approval_binds_verifier_bytes_and_reads_legacy_signed_record(self):
+        root, rid, _ = self.stage()
+        record = self.decide(root, rid)
+        verifier_path = root / record["verifier_result"]
+        original = verifier_path.read_bytes()
+        self.assertEqual(record["verifier_sha256"], hashlib.sha256(original).hexdigest())
+        result = json.loads(original)
+        result["checks"] = [{"name": "substitute", "status": "passed", "message": "edited history"}]
+        verifier_path.write_text(json.dumps(result), encoding="utf-8")
+        self.assertEqual(_util.decision_state(root / "staging", rid), (None, True))
+
+        verifier_path.write_bytes(original)
+        record.pop("verifier_sha256")
+        record.pop("audit_expected")
+        record.pop("audit_binds_record")
+        record["signature"] = _util.sign_record(record, KEY.encode())
+        (root / f"staging/approvals/{rid}.json").write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(_util.decision_state(root / "staging", rid), ("approved", False))
 
     def test_empty_pristine_review_queue_is_available_without_creating_files(self):
         root = self.base / "pristine"

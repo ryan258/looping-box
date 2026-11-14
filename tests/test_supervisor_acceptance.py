@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from looping_box import model, phase1, scaffold, supervisor
+from looping_box import model, phase1, scaffold, supervisor, worker
 from looping_box.eligibility import SourceReingestRequired
 from looping_box.validation import validate_data
 
@@ -95,6 +95,63 @@ class SupervisorAcceptanceTests(unittest.TestCase):
         draft = self.saved("cache/workers/execution_engine/draft.json")
         self.assertEqual(draft["items"][0]["draft"], "MODEL DRAFT")
 
+    def test_reverted_model_retry_restores_committed_draft_after_partial_write(self):
+        self.ingest()
+        self.assertEqual(self.run_pass()["status"], "complete")
+        output_dir = self.root / "cache/workers/execution_engine"
+        draft = output_dir / "draft.json"
+        markdown = output_dir / "draft.md"
+        state = output_dir / "state.json"
+        original = {path: path.read_bytes() for path in (draft, markdown, state)}
+        self.enable()
+        write_json = worker._write_json
+
+        def fail_final_marker(path, value):
+            if path == state:
+                raise OSError("fixture draft marker failure")
+            return write_json(path, value)
+
+        with self.transport("UNCOMMITTED MODEL DRAFT"), patch.object(worker, "_write_json", fail_final_marker):
+            with self.assertRaisesRegex(OSError, "draft marker failure"):
+                self.run_pass(now="2026-10-03T12:00:01Z")
+        partial = draft.read_bytes()
+        self.assertNotEqual(partial, original[draft])
+        self.assertNotEqual(markdown.read_bytes(), original[markdown])
+        self.assertEqual(state.read_bytes(), original[state])
+
+        os.environ.pop("MODEL_EXECUTION_ENGINE")
+        before = self.worker_files()
+        planned = worker.run_worker(self.root, "execution_engine", dry_run=True)
+        self.assertEqual(planned["status"], "complete")
+        self.assertEqual(self.worker_files(), before)
+        self.assertFalse(any(action["destination"].endswith("state.json") for action in planned["planned_actions"]))
+
+        with patch.object(model, "generate_if_enabled") as generate:
+            result = self.run_pass(now="2026-10-03T12:00:02Z")
+            generate.assert_not_called()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["plan"], ["execution_engine"])
+        self.assertEqual({path: path.read_bytes() for path in original}, original)
+        self.assertIn(partial, [path.read_bytes() for path in (output_dir / "history").glob("*-draft.incomplete.json")])
+        self.assertEqual(self.run_pass(now="2026-10-03T12:00:03Z")["status"], "idle")
+
+    def test_draft_receipt_mismatch_without_backup_is_reported_and_preserved(self):
+        self.ingest()
+        self.assertEqual(self.run_pass()["status"], "complete")
+        output_dir = self.root / "cache/workers/execution_engine"
+        draft = output_dir / "draft.json"
+        data = json.loads(draft.read_text())
+        data["items"][0]["draft"] = "Uncommitted draft bytes"
+        draft.write_text(json.dumps(data))
+        evidence = {path: path.read_bytes() for path in (draft, output_dir / "draft.md", output_dir / "state.json")}
+        with patch.object(model, "generate_if_enabled") as generate:
+            result = self.run_pass()
+            generate.assert_not_called()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["worker_outputs"][0]["errors"][0]["code"], "state_inconsistent")
+        self.assertIn("committed receipt", result["recovery"]["last_error"])
+        self.assertEqual({path: path.read_bytes() for path in evidence}, evidence)
+
     def test_a23_quiescent_pending_review_blocks_and_status_is_inspection(self):
         reference = self.ingest(text="Please deploy this release.")
         self.assertEqual(self.run_pass()["status"], "blocked")
@@ -107,6 +164,36 @@ class SupervisorAcceptanceTests(unittest.TestCase):
         code, output = self.cli("--status")
         self.assertEqual(code, 0)
         self.assertIn("pending reviews: 1", output)
+
+    def test_retry_archives_repeated_hold_without_replacing_clean_draft(self):
+        self.ingest("clean.txt", "Project docs clean draft.")
+        self.ingest("held.txt", "Please deploy this release.")
+        self.assertEqual(self.run_pass()["status"], "blocked")
+        draft_path = "cache/workers/execution_engine/draft.json"
+        self.assertEqual([item["relative_path"] for item in self.saved(draft_path)["items"]], ["inbox/clean.txt"])
+        artifacts = {
+            self.root / "cache/workers" / relative: content
+            for relative, content in self.worker_files().items()
+            if Path(relative).stem in {"draft", "context_package"}
+        }
+        now = "2026-10-03T12:00:01Z"
+        delta = phase1.run_phase1(self.root, now=now)
+        active = self.root / delta["delta_path"]
+        saved_delta = active.read_bytes()
+        with patch.object(model, "generate_if_enabled") as generate:
+            result = self.run_pass(now=now)
+            generate.assert_not_called()
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["recovery"]["blocked_reason"], "pending_review")
+        self.assertEqual(result["plan"], ["context_builder"])
+        self.assertEqual({path: path.read_bytes() for path in artifacts}, artifacts)
+        self.assertFalse(active.exists())
+        self.assertEqual((active.parent / "archive" / active.name).read_bytes(), saved_delta)
+        self.assertEqual(self.saved("cache/workers/context_builder/state.json")["consumed_inputs"], [])
+
+        self.ingest("later.txt", "Project docs later draft.")
+        self.assertEqual(self.run_pass()["status"], "blocked")
+        self.assertEqual([item["relative_path"] for item in self.saved(draft_path)["items"]], ["inbox/later.txt"])
 
     def test_missing_live_review_evidence_fails_before_workers(self):
         self.ingest(text="Please deploy this release.")
@@ -368,6 +455,22 @@ class SupervisorAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["recovery"], supervisor._clear_recovery())
         self.assertFalse((self.root / reference).exists())
         self.assertEqual(self.saved("cache/workers/context_builder/state.json")["consumed_inputs"], [])
+
+    def test_acknowledges_consumed_skips_without_a_context_reference(self):
+        self.ingest()
+        self.run_pass()
+        skipped = self.ingest()
+        changed = self.ingest("two.txt", "Project docs two.")
+        (self.root / "inbox/one.txt").unlink()
+        removed = phase1.run_phase1(self.root, now=STAMP)["delta_path"]
+        paths = [self.root / reference for reference in (skipped, changed, removed)]
+        self.assertEqual(supervisor._acknowledged_delta_refs(self.root, paths), [])
+
+        marker = "cache/workers/context_builder/state.json"
+        state = self.saved(marker)
+        state["consumed_inputs"] = [skipped, changed, removed]
+        (self.root / marker).write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(supervisor._acknowledged_delta_refs(self.root, paths), [skipped])
 
     def test_stale_source_failure_precedes_disabled_execution_routing(self):
         self.ingest()

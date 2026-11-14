@@ -1,10 +1,14 @@
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.response import addinfourl
 
 _ENV_VARS = (
     "OPENROUTER_API_KEY",
@@ -70,6 +74,75 @@ class ModelLayerTests(unittest.TestCase):
         self.assertEqual(result["text"], "drafted text")
         self.assertEqual(result["model"], "vendor/model-1")
         self.assertEqual(len(result["response_sha256"]), 64)
+
+    def test_workspace_settings_do_not_enable_models_in_another_workspace(self):
+        self._write_env(
+            "OPENROUTER_API_KEY=fixture-alpha-key\nMODEL_EXECUTION_ENGINE=fixture/alpha\n"
+            "OPENROUTER_BASE_URL=https://alpha.example.test/v1\n"
+        )
+        other = self.root / "other"
+        other.mkdir()
+        (other / ".env").write_text(
+            "OPENROUTER_API_KEY=fixture-beta-key\nOPENROUTER_BASE_URL=https://beta.example.test/v1\n",
+            encoding="utf-8",
+        )
+        before = dict(os.environ)
+        with patch.object(model, "_transport", wraps=_fake_transport("fixture draft")) as transport:
+            model.generate_if_enabled("execution_engine", "alpha fixture", root=self.root)
+            self.assertIsNone(model.generate_if_enabled("execution_engine", "private beta fixture", root=other))
+            transport.assert_called_once()
+            url, headers, _, _ = transport.call_args.args
+            self.assertEqual(url, "https://alpha.example.test/v1/chat/completions")
+            self.assertEqual(headers["Authorization"], "Bearer fixture-alpha-key")
+        self.assertEqual(dict(os.environ), before)
+        self.assertIsNone(model.model_for("execution_engine", root=other))
+        self.assertEqual(model.inspect_settings(other)["OPENROUTER_API_KEY"], "fixture-beta-key")
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "", "MODEL_EXECUTION_ENGINE": "fixture/override"}):
+            self.assertFalse(model.is_enabled("execution_engine", root=self.root))
+            self.assertEqual(model.model_for("execution_engine", root=self.root), "fixture/override")
+        self.assertEqual(model.model_for("execution_engine", root=self.root), "fixture/alpha")
+
+    def test_successful_provider_response_cannot_persist_configured_key(self):
+        key = "fixture-credential-echo"
+        self._write_env(f"OPENROUTER_API_KEY={key}\nMODEL_EXECUTION_ENGINE=fixture/drafter\n")
+        for model_id, draft in (("fixture/drafter", f"Echo: {key}"), (key, "fixture draft")):
+            response = {"model": model_id, "choices": [{"message": {"content": draft}}]}
+            with self.subTest(model_id=model_id), patch.object(model, "_transport", return_value=json.dumps(response)):
+                with self.assertRaisesRegex(model.ModelError, "response contained the configured API key") as raised:
+                    model.complete("execution_engine", "fixture", root=self.root)
+                self.assertNotIn(key, str(raised.exception))
+
+    def test_http_transport_refuses_redirects_without_following_them(self):
+        initial = "https://provider.example.test/v1/chat/completions"
+        headers = Message()
+        headers["Location"] = "https://other.example.test/collect"
+        response = addinfourl(io.BytesIO(), headers, initial, 302)
+        response.msg = "Found"
+        with patch("urllib.request.HTTPSHandler.https_open", return_value=response) as opened:
+            with self.assertRaises(HTTPError) as raised:
+                model._http_post(initial, {"Authorization": "Bearer fixture-key"}, b"{}", 1)
+        with raised.exception:
+            self.assertEqual(raised.exception.code, 302)
+        opened.assert_called_once()
+        self.assertEqual(opened.call_args.args[0].full_url, initial)
+
+    def test_base_url_is_normalized_and_rejects_ambiguous_suffixes(self):
+        self._write_env("OPENROUTER_API_KEY=fixture-key\nMODEL_EXECUTION_ENGINE=fixture/drafter\n")
+        endpoint = "HTTPS://provider.example.test/v1/"
+        with patch.dict(os.environ, {"OPENROUTER_BASE_URL": endpoint}), patch.object(
+            model, "_transport", side_effect=_fake_transport("fixture draft")
+        ) as transport:
+            model.complete("execution_engine", "fixture", root=self.root)
+        self.assertEqual(transport.call_args.args[0], "https://provider.example.test/v1/chat/completions")
+        for endpoint in ("https://provider.example.test/v1?option=1", "https://provider.example.test/v1#fragment",
+                         "https://user:password@provider.example.test/v1"):
+            with self.subTest(endpoint=endpoint), patch.dict(os.environ, {"OPENROUTER_BASE_URL": endpoint}), patch.object(
+                model, "_transport"
+            ) as transport:
+                with self.assertRaisesRegex(model.ModelError, "configured endpoint"):
+                    model.complete("execution_engine", "fixture", root=self.root)
+                transport.assert_not_called()
 
     def test_execution_engine_uses_model_when_enabled(self):
         # Phase 1 -> context_builder -> execution_engine, with the drafter model on.

@@ -38,10 +38,15 @@ class CommandAcceptanceTests(unittest.TestCase):
         self.guard = self.base / "guard"
         self.guard.mkdir()
         (self.guard / "sitecustomize.py").write_text(
-            "import urllib.request\n"
-            "def no_http(*args, **kwargs):\n"
-            "    raise AssertionError('live provider forbidden')\n"
-            "urllib.request.urlopen = no_http\n", encoding="utf-8")
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "def no_network(event, args):\n"
+            "    if event in ('socket.connect', 'socket.getaddrinfo'):\n"
+            "        marker = os.environ.get('LOOPING_BOX_TEST_NETWORK_MARKER')\n"
+            "        if marker:\n"
+            "            Path(marker).write_text(event)\n"
+            "        raise AssertionError('live provider forbidden')\n"
+            "sys.addaudithook(no_network)\n", encoding="utf-8")
         self.bin = self.base / "bin"
         self.bin.mkdir()
         (self.bin / "python3").symlink_to(sys.executable)
@@ -188,6 +193,49 @@ class CommandAcceptanceTests(unittest.TestCase):
         root = self.workspace()
         self.invoke("--root", str(root), executable=self.wrapper(with_source=False))
         self.assertTrue((root / "cache/workers/execution_engine/draft.json").is_file())
+
+    def test_demos_use_fresh_offline_workspaces_and_show_expected_outcomes(self):
+        inherited = self.workspace("inherited")
+        inherited_before = snapshot(inherited)
+        scratch = self.base / "scratch"
+        scratch.mkdir()
+        old_demo = scratch / "looping-box-demo"
+        old_demo.mkdir()
+        (old_demo / "preserve.txt").write_text("legacy demo evidence")
+        marker = self.base / "network-attempt"
+        env = dict(self.env, TMPDIR=str(scratch), LOOPING_BOX_ROOT=str(inherited),
+                   OPENROUTER_API_KEY="fixture-provider-key", OPENROUTER_BASE_URL="https://provider.example.test/v1",
+                   MODEL_CONTEXT_BUILDER="fixture/context", MODEL_EXECUTION_ENGINE="fixture/draft",
+                   MODEL_VERIFIER="fixture/review", LOOPING_BOX_TEST_NETWORK_MARKER=str(marker))
+
+        one = self.invoke(executable=ROOT / "demo-1.sh", env=env).stdout
+        two = self.invoke(executable=ROOT / "demo-2.sh", env=env).stdout
+        three = self.invoke(executable=ROOT / "demo-3.sh", env=env).stdout
+        self.assertIn("status: complete", one)
+        self.assertIn("review_required staging/reviews/", two)
+        self.assertIn("status: blocked", two)
+        self.assertIn("approved: review-", three)
+        self.assertIn("status: complete", three)
+
+        sections = self.invoke(executable=ROOT / "demos/run-all.sh", env=env).stdout
+        outcomes = (
+            "Safe note, drafted locally:", "declined, as designed", "broken chain detected",
+            "== Held now:\n  (nothing is held)", "CI exit code 2: inspect",
+            "-> 10/10 caught", "caught 10/10 incidents", "DM approved", "## Decisions",
+        )
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                self.assertIn(outcome, sections)
+        self.assertEqual(sections.count("CI exit code 0: PASS"), 2)
+        roots = [Path(path) for path in re.findall(r"^Demo workspace: (.+)$", one + two + three + sections, re.M)]
+        self.assertEqual(len(roots), 11)
+        self.assertEqual(len(set(roots)), len(roots))
+        for root in roots:
+            self.assertEqual(root.parent, scratch)
+            self.assertTrue(root.is_dir())
+        self.assertEqual(snapshot(inherited), inherited_before)
+        self.assertEqual((old_demo / "preserve.txt").read_text(), "legacy demo evidence")
+        self.assertFalse(marker.exists())
 
     def test_low_level_phase1_keeps_contained_custom_paths(self):
         root = self.workspace(text=None)
