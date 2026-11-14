@@ -15,14 +15,16 @@ import hashlib
 import json
 import os
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import SplitResult, urlsplit
 
 from .paths import file_path
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-_env_loaded_for: set[str] = set()
+_env_loaded_for: dict[str, dict[str, str]] = {}
 # Only the model layer's own settings are read from `.env`: it must not be able to set
 # unrelated variables (e.g. LOOPING_BOX_REVIEW_KEY, LOOPING_BOX_ALLOW_NONINTERACTIVE).
 _ENV_PREFIXES = ("OPENROUTER_", "MODEL_")
@@ -36,72 +38,125 @@ class ModelError(RuntimeError):
     """
 
 
-def load_env(root: Path | str = ".") -> None:
-    """Load OPENROUTER_*/MODEL_* from `<root>/.env` into os.environ once per root. Existing vars win."""
-    root_path = Path(root).resolve()
-    env_path = file_path(root_path / ".env")
-    key = str(root_path)
-    # ponytail: one-shot CLIs benefit from process-lifetime caching. If daemon
-    # mode lands, reload semantics should change so .env edits can take effect.
-    if key in _env_loaded_for:
-        return
-    _env_loaded_for.add(key)
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
+@dataclass(frozen=True)
+class RoleSettings:
+    model_id: str | None
+    api_key: str | None = field(repr=False)
+    base_url: str = field(repr=False)
+
+
+def _read_workspace_settings(path: Path) -> dict[str, str]:
+    settings: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return settings
+    for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         name, _, value = stripped.partition("=")
         name = name.strip().removeprefix("export ").strip()
         if name.startswith(_ENV_PREFIXES):
-            os.environ.setdefault(name, value.strip().strip('"').strip("'"))
+            settings.setdefault(name, value.strip().strip('"').strip("'"))
+    return settings
+
+
+def _with_process_settings(settings: dict[str, str]) -> dict[str, str]:
+    process = {name: value for name, value in os.environ.items() if name.startswith(_ENV_PREFIXES)}
+    return {**settings, **process}
+
+
+def load_env(root: Path | str = ".") -> dict[str, str]:
+    """Read model settings once per resolved workspace and apply process overrides."""
+    return _with_process_settings(_workspace_settings(Path(root).resolve()))
+
+
+def _workspace_settings(root_path: Path) -> dict[str, str]:
+    path = file_path(root_path / ".env")
+    key = str(root_path)
+    if key not in _env_loaded_for:
+        _env_loaded_for[key] = _read_workspace_settings(path)
+    return _env_loaded_for[key]
 
 
 def inspect_settings(root: Path | str) -> dict[str, str]:
     """Fresh model settings for diagnostics, without changing the process environment/cache."""
-    settings = {name: value for name, value in os.environ.items() if name.startswith(_ENV_PREFIXES)}
     path = file_path(Path(root).resolve() / ".env")
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            name, _, value = stripped.partition("=")
-            name = name.strip().removeprefix("export ").strip()
-            if name.startswith(_ENV_PREFIXES):
-                settings.setdefault(name, value.strip().strip('"').strip("'"))
-    return settings
+    return _with_process_settings(_read_workspace_settings(path))
 
 
-def model_for(role: str) -> str | None:
-    return os.environ.get(f"MODEL_{role.upper()}") or None
+def model_for(role: str, *, root: Path | str = ".") -> str | None:
+    return role_settings(role, root=root).model_id
+
+
+def role_settings(role: str, *, root: Path | str = ".") -> RoleSettings:
+    """Capture one request's effective settings without exposing its credential."""
+    workspace = _workspace_settings(Path(root).resolve())
+    settings = _with_process_settings(workspace)
+    model_id = settings.get(f"MODEL_{role.upper()}") or None
+    api_key = settings.get("OPENROUTER_API_KEY")
+    workspace_key = workspace.get("OPENROUTER_API_KEY")
+    if model_id is not None:
+        if any(_redact(model_id, key) != model_id for key in (api_key, workspace_key)):
+            raise ModelError("configured model ID contains an API key")
+        try:
+            model_id.encode("utf-8")
+        except UnicodeError:
+            raise ModelError("configured model ID is not valid UTF-8") from None
+    return RoleSettings(model_id, api_key, settings.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL))
 
 
 def is_enabled(role: str, *, root: Path | str = ".") -> bool:
-    load_env(root)
-    return bool(os.environ.get("OPENROUTER_API_KEY") and model_for(role))
+    settings = load_env(root)
+    return bool(settings.get("OPENROUTER_API_KEY") and settings.get(f"MODEL_{role.upper()}"))
+
+
+def parse_base_url(value: str) -> SplitResult:
+    """Validate the endpoint format used by both diagnostics and transport."""
+    message = "configured endpoint must be an HTTP(S) URL without credentials, a query, or a fragment"
+    try:
+        if any(ch.isspace() or ord(ch) < 32 for ch in value) or "?" in value or "#" in value:
+            raise ValueError
+        endpoint = urlsplit(value)
+        _ = endpoint.port  # Access validates the port.
+        if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
+                or endpoint.username is not None or endpoint.password is not None):
+            raise ValueError
+    except ValueError:
+        raise ValueError(message) from None
+    return endpoint
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # The configured endpoint is the only destination for this request.
+        return None
 
 
 # Injectable so tests never hit the network: (url, headers, body, timeout) -> raw text.
 def _http_post(url: str, headers: dict[str, str], body: bytes, timeout: float) -> str:
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 (trusted base url)
+    opener = urllib.request.build_opener(_NoRedirect())
+    with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8")
 
 
 _transport: Callable[[str, dict[str, str], bytes, float], str] = _http_post
 
 
-def redact_error(value: object) -> str:
-    """Sanitize configured credentials before callers truncate or persist errors."""
+def _redact(value: object, secret: str | None) -> str:
     text = str(value)
-    secret = os.environ.get("OPENROUTER_API_KEY")
     if secret:
         forms = {secret, json.dumps(secret)[1:-1], repr(secret)[1:-1]}
         for form in sorted(forms, key=len, reverse=True):
             text = text.replace(form, "[REDACTED]")
     return text
+
+
+def redact_error(value: object, *, root: Path | str = ".") -> str:
+    """Sanitize this workspace's configured credential before persisting errors."""
+    return _redact(value, load_env(root).get("OPENROUTER_API_KEY"))
 
 
 def complete(
@@ -114,17 +169,23 @@ def complete(
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """Call the role's model. Raises if the role/key is not configured."""
-    load_env(root)
-    model = model_for(role)
+    return _complete(role, prompt, role_settings(role, root=root), system, temperature, timeout)
+
+
+def _complete(
+    role: str, prompt: str, settings: RoleSettings, system: str | None, temperature: float, timeout: float
+) -> dict[str, Any]:
+    model = settings.model_id
     if not model:
         raise RuntimeError(f"no model configured for role {role!r} (set MODEL_{role.upper()})")
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = settings.api_key
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not set")
 
-    base_url = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
-    if not base_url.startswith(("https://", "http://")):  # urllib would also open file:// and ftp://
-        raise ModelError("OPENROUTER_BASE_URL must start with https:// or http://")
+    try:
+        base_url = parse_base_url(settings.base_url).geturl().rstrip("/")
+    except ValueError as exc:
+        raise ModelError(str(exc)) from None
     messages = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": prompt}
     ]
@@ -137,16 +198,19 @@ def complete(
         raw = _transport(f"{base_url}/chat/completions", headers, body, timeout)
         data = json.loads(raw)
         if isinstance(data, dict) and data.get("error"):
-            raise ValueError(f"provider error: {redact_error(data['error'])[:200]}")
+            raise ValueError(f"provider error: {_redact(data['error'], api_key)[:200]}")
         text = data["choices"][0]["message"]["content"]
         if not isinstance(text, str):  # refusals / tool calls come back as null content
             raise ValueError("response had no text content")
         returned_model = data.get("model", model)
         if not isinstance(returned_model, str) or not returned_model:
             raise ValueError("response had no valid model ID")
+        if _redact(text, api_key) != text or _redact(returned_model, api_key) != returned_model:
+            raise ValueError("provider response contained the configured API key")
+        returned_model.encode("utf-8")
         response_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     except Exception as exc:  # network, JSON, or unexpected provider shape
-        raise ModelError(f"{role} model call failed: {redact_error(exc)}") from None
+        raise ModelError(f"{role} model call failed: {_redact(exc, api_key)}") from None
     # temperature=0 is requested, but providers don't guarantee determinism, so
     # callers key idempotency on (input hash + model id) and store this hash.
     return {
@@ -163,8 +227,10 @@ def generate_if_enabled(
     system: str | None = None,
     root: Path | str = ".",
     timeout: float = 60.0,
+    _settings: RoleSettings | None = None,
 ) -> dict[str, Any] | None:
     """Return a completion for the role, or None when the role isn't configured."""
-    if not is_enabled(role, root=root):
+    settings = _settings if _settings is not None else role_settings(role, root=root)
+    if not settings.api_key or not settings.model_id:
         return None
-    return complete(role, prompt, system=system, root=root, timeout=timeout)
+    return _complete(role, prompt, settings, system, 0.0, timeout)

@@ -2,34 +2,45 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from . import model
 from .eligibility import SourceReingestRequired, require_eligible
 from ._util import (
+    decision_state,
     default_root as _default_root,
     project_lock as _project_lock,
     read_json as _read_json,
     rel as _rel,
+    retained_phase1_delta_dirs,
     resolve_under_root as _resolve_under_root,
     sha256_file as _sha256_file,
+    signed_rejections,
     utc_now as _utc_now,
     write_json as _write_json,
     write_text as _write_text,
     write_bytes as _write_bytes,
 )
-from .phase1 import _validated_sop
+from .phase1 import DEFAULT_SOP_PATH, _committed_execution_draft, _validated_sop
+from .queue_order import compare_delta_order, delta_order, persisted_delta_order
+from .review import _indexed_reviews
 from .validation import ValidationError, validate_data
-from .paths import UnsafePathError, directory_path, file_path, read_validated, tree_entries
+from .paths import UnsafePathError, directory_path, file_path, matching_files, read_validated, read_validated_snapshot, tree_entries
 
 
 WORKER_OUTPUT_SCHEMA = "looping-box.worker.output.v1"
 WORKER_STATE_SCHEMA = "looping-box.worker.state.v1"
 CONTEXT_PACKAGE_SCHEMA = "looping-box.worker.context-package.v1"
 EXECUTION_DRAFT_SCHEMA = "looping-box.execution-draft.v1"
+
+
+class _AmbiguousQueueOrder(SourceReingestRequired):
+    """Same-second queue evidence lacks an ordering receipt."""
 
 
 def run_worker(
@@ -39,6 +50,7 @@ def run_worker(
     now: str | None = None,
     dry_run: bool = False,
     model_timeout_seconds: float = 60.0,
+    _supervised: bool = False,
 ) -> dict[str, Any]:
     """Run one deterministic worker pass."""
     root_path = Path(root).resolve()
@@ -50,6 +62,11 @@ def run_worker(
         _validated_sop(root_path, _resolve_under_root(root_path, "config/sops/phase1_ingestion.json"))
         if worker_id in {"context_builder", "execution_engine"}:
             _validate_existing_worker_artifacts(root_path, worker_id)
+            if not dry_run and not _supervised:
+                # Supervisor imports this worker module, so defer the reverse
+                # import until the public standalone entry point is called.
+                from .supervisor import _initialize_standalone_world
+                _initialize_standalone_world(root_path)
         if worker_id == "context_builder":
             return _run_context_builder(
                 root,
@@ -108,7 +125,6 @@ def _run_context_builder(
     consumed = set(state["consumed_inputs"])
     deltas, errors, planned_actions = _intake_deltas(root_path, delta_dir, consumed, dry_run)
     source_deltas = [reference for reference, _ in deltas]
-    items, blocked_inputs, superseded = _latest_items(deltas)
 
     if errors and (not source_deltas or any(error["code"] == "delta_io_error" for error in errors)):
         output = _worker_output(
@@ -125,7 +141,9 @@ def _run_context_builder(
 
     context_path = output_dir / "context_package.json"
     try:
-        items = _carry_over_undrafted(root_path, context_path, items, superseded_paths=superseded)
+        items, blocked_inputs = _carry_over_undrafted(root_path, context_path, deltas, state.get("retired_context_sha256"))
+        current_items = _reconcile_context_items(root_path, items) if source_deltas else items
+        require_eligible(root_path, current_items)
     except SourceReingestRequired as exc:
         output = _worker_output("context_builder", generated_at, "failed", source_deltas, [],
                                 [*errors, {"code": "source_reingest_required", "message": str(exc)}])
@@ -137,6 +155,23 @@ def _run_context_builder(
         _persist_worker_output(root_path, output_dir, output, dry_run)
         return output
 
+    if items == current_items and _unchanged_intake_batch(root_path, context_path, deltas):
+        # Acknowledge no-op scans without changing the context hash or the
+        # execution state that binds the last successful draft to that context.
+        retired = _retire_ambiguous_context(root_path, context_path, deltas, state)
+        if retired:
+            state["retired_context_sha256"] = retired
+        output = _worker_output("context_builder", generated_at, "idle", source_deltas, [], errors)
+        output["planned_actions"] = planned_actions
+        if dry_run:
+            output["planned_actions"].append({"action": "write", "destination": _rel(root_path, state_path)})
+        _persist_worker_output(root_path, output_dir, output, dry_run)
+        if not dry_run:
+            state["consumed_inputs"].extend(source_deltas)
+            _write_json(state_path, state)
+        return output
+
+    items = current_items
     status = "blocked" if blocked_inputs else "complete"
     markdown_path = output_dir / "context_package.md"
     context = {
@@ -166,14 +201,20 @@ def _run_context_builder(
                 root=root_path,
                 timeout=model_timeout_seconds,
             )
-        except model.ModelError as exc:
+            if completion is not None:
+                _require_current_queue(root_path, items)
+                require_eligible(root_path, items)
+        except (SourceReingestRequired, model.ModelError) as exc:
+            error = ({"code": "source_reingest_required", "message": str(exc)}
+                     if isinstance(exc, SourceReingestRequired)
+                     else {"code": "model_error", "message": model.redact_error(exc, root=root_path)})
             output = _worker_output(
                 "context_builder",
                 generated_at,
                 "failed",
                 source_deltas,
                 [],
-                [*errors, {"code": "model_error", "message": model.redact_error(exc)}],
+                [*errors, error],
             )
             _persist_worker_output(root_path, output_dir, output, dry_run)
             return output
@@ -202,6 +243,7 @@ def _run_context_builder(
         _persist_worker_output(root_path, output_dir, output, dry_run)
         state["consumed_inputs"].extend(source_deltas)
         state["last_run_at"] = generated_at
+        state.pop("retired_context_sha256", None)
         _write_json(state_path, state)
     return output
 
@@ -285,22 +327,41 @@ def _retained_source_deltas(root: Path, context_path: Path, consumed: set[str], 
     return sorted(retained)
 
 
-def _plan_batch(root: Path, output_dir: Path, names: tuple[str, ...], output: dict[str, Any]) -> None:
+def _plan_batch(
+    root: Path, output_dir: Path, names: tuple[str, ...], output: dict[str, Any], *, write_state: bool = True,
+) -> None:
     for source, destination in _history_targets(output_dir, names):
         output["planned_actions"].append({"action": "archive", "source": _rel(root, source),
                                           "destination": _rel(root, destination)})
-    for name in (*names, "state.json"):
+    for name in ((*names, "state.json") if write_state else names):
         output["planned_actions"].append({"action": "write", "destination": _rel(root, output_dir / name)})
     _persist_worker_output(root, output_dir, output, True)
 
 
-def _latest_items(deltas: list[tuple[str, dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
-    """Latest timestamp and numeric collision suffix win, including explicit removals."""
-    events: dict[str, tuple[tuple[str, int, str], dict[str, Any] | None]] = {}
+def _latest_items(
+    root: Path, deltas: list[tuple[str, dict[str, Any]]], previous: list[dict[str, Any]],
+    *, persisted_order: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply scans in timestamp and numeric collision-suffix order."""
+    directories = defaultdict(set)
     for reference, delta in deltas:
-        run_tail = delta["run_id"].removeprefix("phase1-delta-")
-        sequence = int(run_tail.rsplit("-", 1)[1]) if "-" in run_tail else 1
-        rank = (delta["generated_at"], sequence, reference)
+        directories[delta["generated_at"]].add(Path(reference).parent)
+
+    def order(entry: tuple[str, dict[str, Any]]) -> tuple[str, int, str]:
+        reference, delta = entry
+        stamp, suffix, reference = delta_order(reference, delta["generated_at"], run_id=delta["run_id"])
+        if len(directories[stamp]) > 1:
+            if persisted_order is None or reference not in persisted_order:
+                raise _AmbiguousQueueOrder(
+                    "source_reingest_required: cannot order same-time scans from different delta directories; rebuild context"
+                )
+            suffix = persisted_order[reference]
+        return stamp, suffix, reference
+
+    events = {item["relative_path"]: item for item in previous}
+    for reference, delta in sorted(deltas, key=order):
+        sop = delta["sop"]
+        custom_sop = sop if sop["path"] != DEFAULT_SOP_PATH else None
         for change in delta["changes"]:
             item = {field: change[field] for field in ("relative_path", "sha256", "matched_routes", "excerpt")}
             item["source_delta"] = reference
@@ -309,55 +370,353 @@ def _latest_items(deltas: list[tuple[str, dict[str, Any]]]) -> tuple[list[dict[s
             if change["review_reasons"]:
                 item["review_reasons"] = change["review_reasons"]
                 item["pending_review_payload"] = delta["boundary_gate"]["payload"]
-            path = change["relative_path"]
-            if path not in events or rank >= events[path][0]:
-                events[path] = (rank, item)
+            elif custom_sop is not None:
+                item["source_sop"] = custom_sop
+            events[item["relative_path"]] = item
+        for skip in delta["skipped"]:
+            path = skip["relative_path"]
+            item = events.get(path)
+            if item is None:
+                continue  # Deduplication never introduces new drafting work.
+            current = skip.get("current")
+            approval = current.get("approved_review") if current else None
+            if current is None and skip["reason"] == "review_decision_recorded" and item.get("approved_review"):
+                legacy_approval = item["approved_review"]
+                if decision_state(root / "staging", legacy_approval)[0] == "approved":
+                    approval = legacy_approval
+            if (item["sha256"] != skip["sha256"] or item.get("review_reasons")
+                    or (skip["reason"] == "review_decision_recorded" and
+                        (not approval or approval != item.get("approved_review")))):
+                del events[path]
+            elif current:
+                refreshed = {**item, "matched_routes": current["matched_routes"], "excerpt": current["excerpt"]}
+                if custom_sop is not None:
+                    refreshed["source_sop"] = custom_sop
+                else:
+                    refreshed.pop("source_sop", None)
+                if refreshed != item:
+                    # A skip can refresh presentation but has no release authority.
+                    events[path] = refreshed
         for path in delta["reconciliation"]["removed_paths"]:
-            if path not in events or rank >= events[path][0]:
-                events[path] = (rank, None)
+            events.pop(path, None)
     items, blocked = [], []
+    for item in previous:
+        path = item["relative_path"]
+        if events.get(path) is item:
+            items.append(events.pop(path))
     for path in sorted(events):
-        item = events[path][1]
-        if item is not None:
-            (blocked if item.get("review_reasons") else items).append(item)
-    return items, blocked, set(events)
+        item = events[path]
+        (blocked if item.get("review_reasons") else items).append(item)
+    return items, blocked
+
+
+def _context_queue_deltas(
+    root: Path, items: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    origins = {item["source_delta"] for item in items}
+    origin_orders = [delta_order(reference) for reference in origins]
+    retained = {}
+    state_path = file_path(_resolve_under_root(root, "cache/state/phase1_state.json"))
+    state = read_validated(state_path, "phase1_state") if state_path.exists() else {}
+    persisted_order = persisted_delta_order(state)
+    default_queue = _resolve_under_root(root, "cache/deltas")
+    queues = [default_queue, *(_resolve_under_root(root, path) for path in sorted(retained_phase1_delta_dirs(state)))]
+
+    def compare_to_origins(order: tuple[str, int, str], *, archive_name: bool = False) -> list[int | None]:
+        # An archive collision rename preserves timestamp and increases suffix.
+        # A renamed suffix cannot identify a cross-directory ledger entry.
+        return [compare_delta_order(order, origin, {} if archive_name else persisted_order)
+                for origin in origin_orders]
+
+    for queue in dict.fromkeys(queues):
+        try:
+            active = sorted(directory_path(queue).iterdir())
+        except FileNotFoundError:
+            if queue != default_queue:
+                raise ValueError(f"{_rel(root, queue)}: a recorded Phase 1 delta directory is unavailable") from None
+            active = []
+        try:
+            archived = sorted(directory_path(queue / "archive").iterdir())
+        except FileNotFoundError:
+            archived = []
+        for paths, is_archive in ((active, False), (archived, True)):
+            for path in paths:
+                if not path.name.endswith(".json"):
+                    continue
+                order = delta_order(_rel(root, queue / path.name), archived_name=is_archive)
+                comparisons = compare_to_origins(order, archive_name=is_archive)
+                if order[0] and all(result == -1 for result in comparisons):
+                    continue
+                try:
+                    delta = read_validated(path, "phase1_delta")
+                except (OSError, ValidationError):
+                    # Historical archives may contain old malformed evidence or a collision
+                    # sentinel. Active or potentially newer evidence must be readable.
+                    if order[0] and (not is_archive or any(result in (None, 1) for result in comparisons)):
+                        raise
+                    continue
+                reference = delta["delta_path"]
+                if is_archive and path.parent in queues and reference == _rel(root, path):
+                    continue  # This archive directory is also a registered active queue.
+                if (Path(reference).parent.as_posix() != _rel(root, queue)
+                        or (not is_archive and reference != _rel(root, path))):
+                    raise ValueError(f"{_rel(root, path)}: Phase 1 evidence has a different original reference")
+                if reference in retained and retained[reference] != delta:
+                    raise ValueError(f"{reference}: conflicting Phase 1 delta evidence")
+                retained[reference] = delta
+
+    for run in state.get("runs", []):
+        reference = run["delta_path"]
+        if not reference:
+            continue
+        if reference in retained or all(result == -1 for result in compare_to_origins(delta_order(reference))):
+            continue
+        path = file_path(_resolve_under_root(root, reference))
+        if path.exists():
+            delta = read_validated(path, "phase1_delta")
+            if delta["delta_path"] != reference:
+                raise ValueError(f"{reference}: Phase 1 evidence has a different original reference")
+            retained[reference] = delta
+        elif reference not in origins and (
+            path.parent != default_queue or run["summary"]["changed"] or run["summary"]["requires_review"]
+        ):
+            raise ValueError(f"{reference}: newer Phase 1 evidence is unavailable")
+    return retained, persisted_order
+
+
+def _after_origin(
+    order: tuple[str, int, str], origin: tuple[str, int, str], persisted_order: dict[str, int]
+) -> bool:
+    comparison = compare_delta_order(order, origin, persisted_order)
+    if comparison is None:
+        raise _AmbiguousQueueOrder(
+            "source_reingest_required: cannot order same-time scans from different delta directories; rebuild context"
+        )
+    return comparison > 0
+
+
+def _require_current_queue(root: Path, items: list[dict[str, Any]]) -> None:
+    """Reject context superseded by a later source scan or a live review."""
+    if _reconcile_context_items(root, items) != items:
+        raise SourceReingestRequired(
+            "source_reingest_required: newer Phase 1 or review evidence superseded the saved context; "
+            "rebuild context before execution"
+        )
+
+
+def _reconcile_context_items(root: Path, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove known vetoed paths and require new intake for other supersession."""
+    by_path = {item["relative_path"]: item for item in items}
+    if not by_path:
+        return []
+    vetoed: set[str] = set()
+    try:
+        for snapshot in _indexed_reviews(root):
+            payload = snapshot.payload
+            path = payload["source_items"][0]["relative_path"]
+            if path in by_path and (
+                by_path[path].get("approved_review") != payload["review_id"]
+                or decision_state(root / "staging", payload["review_id"])[0] != "approved"
+            ):
+                vetoed.add(path)
+
+        rejections = list(signed_rejections(root / "staging", {path: item["sha256"] for path, item in by_path.items()}))
+        retained, persisted_order = _context_queue_deltas(root, items)
+    except UnsafePathError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise SourceReingestRequired(f"source_reingest_required: {exc}; rebuild context before execution") from exc
+
+    source_orders = {}
+    for path, item in by_path.items():
+        reference = item["source_delta"]
+        origin = retained.get(reference, {})
+        source_orders[path] = delta_order(reference, origin.get("generated_at"), run_id=origin.get("run_id"))
+    newer = defaultdict(list)
+    for reference, delta in retained.items():
+        order = delta_order(reference, delta["generated_at"], run_id=delta["run_id"])
+        changes, skipped = defaultdict(list), defaultdict(list)
+        for entry in delta["changes"]:
+            changes[entry["relative_path"]].append(entry)
+        for entry in delta["skipped"]:
+            skipped[entry["relative_path"]].append(entry)
+        removed = set(delta["reconciliation"]["removed_paths"])
+        for path in ((set(changes) | set(skipped) | removed) & by_path.keys()) - vetoed:
+            if _after_origin(order, source_orders[path], persisted_order):
+                newer[path].append((reference, {
+                    **delta, "changes": changes.get(path, []), "skipped": skipped.get(path, []),
+                    "reconciliation": {"removed_paths": [path] if path in removed else []},
+                }))
+    for path, deltas in newer.items():
+        current, blocked = _latest_items(root, deltas, [by_path[path]], persisted_order=persisted_order)
+        if blocked or not current:
+            vetoed.add(path)
+        elif current != [by_path[path]]:
+            raise SourceReingestRequired(
+                "source_reingest_required: newer Phase 1 evidence superseded the saved context; rebuild context before execution"
+            )
+    # A signature can postdate its hold, and an older explicit-state queue may
+    # be unregistered. Check the actual rejection against the introducing delta.
+    for record, payload in rejections:
+        path = payload["source_items"][0]["relative_path"]
+        stamp, _, reference = source_orders[path]
+        origin = retained.get(reference, {})
+        positive_origin = any(entry["relative_path"] == path and entry["sha256"] == by_path[path]["sha256"]
+                              and not entry["review_reasons"]
+                              for entry in origin.get("changes", []))
+        known_rejections = origin.get("prior_rejection_signatures")
+        rejection_precedes_release = (record["generated_at"] < stamp if known_rejections is None
+                                      else record["signature"] in known_rejections)
+        if not positive_origin or not rejection_precedes_release:
+            vetoed.add(path)
+    return [item for item in items if item["relative_path"] not in vetoed]
 
 
 def _carry_over_undrafted(
-    root: Path, context_path: Path, items: list[dict[str, Any]], *, superseded_paths: set[str] | None = None,
-) -> list[dict[str, Any]]:
+    root: Path, context_path: Path, deltas: list[tuple[str, dict[str, Any]]], retired_hash: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Retain undrafted eligible items only while their current source evidence agrees."""
     previous = []
     if context_path.exists():
-        context = read_validated(context_path, "context_package")
+        context, raw = read_validated_snapshot(context_path, "context_package")
         state_path = _resolve_under_root(root, "cache/workers/execution_engine/state.json")
         state = _read_worker_state(state_path, "execution_engine")
-        if state.get("last_context_sha256") != _sha256_file(context_path):
+        if hashlib.sha256(raw).hexdigest() not in {state.get("last_context_sha256"), retired_hash}:
             previous = context["items"]
-    fresh_paths = set(superseded_paths or ()) | {item["relative_path"] for item in items}
-    merged = [item for item in previous if item["relative_path"] not in fresh_paths] + items
-    require_eligible(root, merged)
-    return merged
+    items, blocked = _latest_items(root, deltas, previous)
+    return items, blocked
+
+
+def _delta_keeps_blocked_inputs(delta: dict[str, Any], blocked_by_path: dict[str, dict[str, Any]]) -> bool:
+    """Check whether a scan only repeats existing holds or records skips."""
+    if delta["reconciliation"]["removed_paths"] or not (delta["changes"] or delta["skipped"]):
+        return False
+    for change in delta["changes"]:
+        held = blocked_by_path.get(change["relative_path"])
+        if (not change["review_reasons"] or held is None
+                or held["pending_review_payload"] != delta["boundary_gate"]["payload"]
+                or any(held.get(field) != change.get(field) for field in (
+                    "sha256", "matched_routes", "excerpt", "review_reasons", "approved_review",
+                ))):
+            return False
+    return True
+
+
+def _unchanged_intake_batch(
+    root: Path, context_path: Path, deltas: list[tuple[str, dict[str, Any]]]
+) -> bool:
+    if not context_path.exists():
+        return False
+    context = read_validated(context_path, "context_package")
+    blocked_by_path = {item["relative_path"]: item for item in context["blocked_inputs"]}
+    if not all(_delta_keeps_blocked_inputs(delta, blocked_by_path) for _, delta in deltas):
+        return False
+    previous = context["items"] + context["blocked_inputs"]
+    eligible, blocked = _latest_items(root, deltas, previous)
+    return eligible == context["items"] and blocked_by_path.keys() == {item["relative_path"] for item in blocked}
+
+
+def _retire_ambiguous_context(
+    root: Path, context_path: Path, deltas: list[tuple[str, dict[str, Any]]], state: dict[str, Any],
+) -> str | None:
+    """A later no-op scan can retire legacy ambiguity without reusing the draft inputs."""
+    context, raw = read_validated_snapshot(context_path, "context_package")
+    digest = hashlib.sha256(raw).hexdigest()
+    if context["blocked_inputs"] or state.get("retired_context_sha256") == digest:
+        return None
+    rescanned_at = {
+        skip["relative_path"]: delta["generated_at"]
+        for _, delta in sorted(deltas, key=lambda entry: delta_order(entry[0], entry[1]["generated_at"]))
+        for skip in delta["skipped"]
+        if skip.get("current") is not None
+    }
+    if any(rescanned_at.get(item["relative_path"], "") <= delta_order(item["source_delta"])[0]
+           for item in context["items"]):
+        return None
+    try:
+        _require_current_queue(root, context["items"])
+    except _AmbiguousQueueOrder:
+        output_dir = _resolve_under_root(root, "cache/workers/execution_engine")
+        try:
+            draft, draft_raw = read_validated_snapshot(output_dir / "draft.json", "execution_draft")
+        except FileNotFoundError:
+            return None
+        if (draft["source_context"] == _rel(root, context_path)
+                and draft["source_context_sha256"] == digest
+                and _committed_execution_draft(output_dir, draft, draft_raw)):
+            return digest
+    except SourceReingestRequired:
+        pass  # Leave other stale-source failures visible to the execution worker.
+    return None
 
 
 def _execution_snapshot(root: Path) -> dict[str, Any]:
     """Read and validate the same evidence for direct execution and scheduler invalidation."""
     context_path = _resolve_under_root(root, "cache/workers/context_builder/context_package.json")
-    context = read_validated(context_path, "context_package")
-    require_eligible(root, context["items"])
-    context_hash = _sha256_file(context_path)
-    model.load_env(root)
-    model_id = model.model_for("execution_engine")
-    state = _read_worker_state(_resolve_under_root(root, "cache/workers/execution_engine/state.json"), "execution_engine")
-    return {"context": context, "context_sha256": context_hash, "model_id": model_id, "state": state,
-            "needs_run": state.get("last_context_sha256") != context_hash or state.get("last_model") != model_id}
+    context, raw = read_validated_snapshot(context_path, "context_package")
+    context_hash = hashlib.sha256(raw).hexdigest()
+    context_state = _read_worker_state(context_path.parent / "state.json", "context_builder")
+    output_dir = _resolve_under_root(root, "cache/workers/execution_engine")
+    state = _read_worker_state(output_dir / "state.json", "execution_engine")
+    same_context = state.get("last_context_sha256") == context_hash
+    model_settings = None
+    needs_draft = False
+    if context_state.get("retired_context_sha256") != context_hash:
+        _require_current_queue(root, context["items"])
+        require_eligible(root, context["items"])
+        model_settings = model.role_settings("execution_engine", root=root)
+        needs_draft = not same_context or state.get("last_model") != model_settings.model_id
+    draft_sha = state.get("last_draft_sha256")
+    recover_draft = (not needs_draft and same_context and draft_sha is not None
+                     and _sha256_file(output_dir / "draft.json") != draft_sha)
+    return {"context": context, "context_sha256": context_hash, "model_settings": model_settings,
+            "state": state, "needs_run": needs_draft or recover_draft, "recover_draft": recover_draft}
+
+
+def _recover_interrupted_draft(
+    root: Path, output_dir: Path, generated_at: str, draft_sha: str, *, dry_run: bool,
+) -> dict[str, Any]:
+    """Restore only a retained draft that matches the committed execution receipt."""
+    for path in matching_files(output_dir / "history", "*-draft.json"):
+        try:
+            draft, raw = read_validated_snapshot(path, "execution_draft")
+        except (OSError, ValidationError):
+            continue
+        if hashlib.sha256(raw).hexdigest() != draft_sha or not _committed_execution_draft(output_dir, draft, raw):
+            continue
+        names = ("draft.json", "draft.md")
+        artifacts = [_rel(root, output_dir / name) for name in names]
+        output = _worker_output("execution_engine", generated_at, "complete", [], artifacts, [])
+        if dry_run:
+            _plan_batch(root, output_dir, names, output, write_state=False)
+        else:
+            _archive_previous(output_dir, names)
+            # Restore the derivative first so the matching JSON receipt marks
+            # the pair as restored only after both writes have succeeded.
+            _write_text(output_dir / "draft.md", _draft_markdown(draft))
+            _write_bytes(output_dir / "draft.json", raw)
+            _persist_worker_output(root, output_dir, output, dry_run)
+        return output
+    reference = _rel(root, output_dir / "draft.json")
+    output = _worker_output("execution_engine", generated_at, "failed", [], [], [{
+        "code": "state_inconsistent",
+        "message": f"state_inconsistent: {reference} disagrees with its committed receipt. "
+                   "Restore the matching draft from a consistent backup before retrying.",
+    }])
+    _persist_worker_output(root, output_dir, output, dry_run)
+    return output
 
 
 def execution_needs_run(root: Path | str) -> bool:
     """Read-only scheduling predicate; stale evidence raises instead of appearing idle."""
     root_path = Path(root).resolve()
     context_path = _resolve_under_root(root_path, "cache/workers/context_builder/context_package.json")
-    return _execution_snapshot(root_path)["needs_run"] if context_path.exists() else False
+    if not context_path.exists():
+        return False
+    try:
+        return _execution_snapshot(root_path)["needs_run"]
+    except model.ModelError:
+        return True  # Execution publishes the configuration failure as worker evidence.
 
 
 def _run_execution_engine(
@@ -387,17 +746,20 @@ def _run_execution_engine(
 
     try:
         snapshot = _execution_snapshot(root_path)
-    except SourceReingestRequired as exc:
-        output = _worker_output("execution_engine", generated_at, "failed", [], [],
-                                [{"code": "source_reingest_required", "message": str(exc)}])
+    except (SourceReingestRequired, model.ModelError) as exc:
+        code = "source_reingest_required" if isinstance(exc, SourceReingestRequired) else "model_error"
+        output = _worker_output("execution_engine", generated_at, "failed", [], [], [{"code": code, "message": str(exc)}])
         _persist_worker_output(root_path, output_dir, output, dry_run)
         return output
-    context, state = snapshot["context"], snapshot["state"]
-    context_hash, model_id = snapshot["context_sha256"], snapshot["model_id"]
     if not snapshot["needs_run"]:
         output = _worker_output("execution_engine", generated_at, "idle", [], [], [])
         _persist_worker_output(root_path, output_dir, output, dry_run)
         return output
+    if snapshot["recover_draft"]:
+        return _recover_interrupted_draft(root_path, output_dir, generated_at,
+                                          snapshot["state"]["last_draft_sha256"], dry_run=dry_run)
+    context, state = snapshot["context"], snapshot["state"]
+    context_hash, model_settings = snapshot["context_sha256"], snapshot["model_settings"]
 
     source_deltas = list(context.get("source_deltas", []))
     # Gating is per item: `items` never contains a boundary-gated input, so a
@@ -413,15 +775,28 @@ def _run_execution_engine(
             list(context.get("items", [])),
             dry_run,
             model_timeout_seconds,
+            model_settings,
         )
-    except model.ModelError as exc:
+        if not dry_run:
+            _require_current_queue(root_path, context["items"])
+            require_eligible(root_path, context["items"])
+            try:
+                still_current = _sha256_file(context_path) == context_hash
+            except OSError as exc:
+                raise SourceReingestRequired(f"source_reingest_required: context unavailable during drafting: {exc}") from exc
+            if not still_current:
+                raise SourceReingestRequired("source_reingest_required: context changed during drafting; retry execution")
+    except (SourceReingestRequired, model.ModelError) as exc:
+        error = ({"code": "source_reingest_required", "message": str(exc)}
+                 if isinstance(exc, SourceReingestRequired)
+                 else {"code": "model_error", "message": model.redact_error(exc, root=root_path)})
         output = _worker_output(
             "execution_engine",
             generated_at,
             "failed",
             source_deltas,
             [],
-            [{"code": "model_error", "message": model.redact_error(exc)}],
+            [error],
         )
         _persist_worker_output(root_path, output_dir, output, dry_run)
         return output
@@ -446,13 +821,21 @@ def _run_execution_engine(
     if dry_run:
         _plan_batch(root_path, output_dir, ("draft.json", "draft.md"), output)
     if not dry_run:
+        if not state.get("last_draft_sha256") and draft_path.exists():
+            previous, previous_raw = read_validated_snapshot(draft_path, "execution_draft")
+            if _committed_execution_draft(output_dir, previous, previous_raw):
+                # Preserve an exact legacy receipt before replacing draft.json.
+                state["last_draft_sha256"] = hashlib.sha256(previous_raw).hexdigest()
+                _write_json(state_path, state)
         _archive_previous(output_dir, ("draft.json", "draft.md"))
         _write_json(draft_path, draft)
         _write_text(draft_markdown_path, _draft_markdown(draft))
         _persist_worker_output(root_path, output_dir, output, dry_run)
         state["last_context_sha256"] = context_hash
-        state["last_model"] = model_id
+        state["last_model"] = model_settings.model_id
         state["last_run_at"] = generated_at
+        saved = (json.dumps(draft, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        state["last_draft_sha256"] = hashlib.sha256(saved).hexdigest()
         _write_json(state_path, state)
     return output
 
@@ -462,9 +845,10 @@ def _draft_items(
     items: list[dict[str, Any]],
     dry_run: bool,
     model_timeout_seconds: float,
+    model_settings: model.RoleSettings,
 ) -> list[dict[str, Any]]:
     if len(items) <= 1:
-        return [_draft_item(root, item, dry_run, model_timeout_seconds) for item in items]
+        return [_draft_item(root, item, dry_run, model_timeout_seconds, model_settings) for item in items]
 
     drafted_items = [_offline_draft_item(item) for item in items]
     if dry_run:
@@ -490,6 +874,7 @@ def _draft_items(
         prompt,
         root=root,
         timeout=model_timeout_seconds,
+        _settings=model_settings,
     )
     if completion is None:
         return drafted_items
@@ -500,6 +885,7 @@ def _draft_items(
         if not isinstance(drafts, list):
             raise ValueError("drafts is not a list")
         requested = {item["relative_path"] for item in items}
+        api_key = model_settings.api_key
         drafts_by_path = {}
         for item in drafts:
             if (not isinstance(item, dict) or not isinstance(item.get("relative_path"), str)
@@ -508,7 +894,11 @@ def _draft_items(
             path = item["relative_path"]
             if path in drafts_by_path:
                 raise ValueError("duplicate draft path")
-            drafts_by_path[path] = item["draft"]
+            draft = item["draft"]
+            if api_key and api_key in draft:
+                raise ValueError("provider response contained the configured API key")
+            draft.encode("utf-8")  # Validate rendered text before any draft/history writes.
+            drafts_by_path[path] = draft
         if set(drafts_by_path) != requested or len(requested) != len(items):
             raise ValueError("draft paths must match the requested batch exactly")
         for drafted in drafted_items:
@@ -548,6 +938,7 @@ def _draft_item(
     item: dict[str, Any],
     dry_run: bool,
     model_timeout_seconds: float,
+    model_settings: model.RoleSettings,
 ) -> dict[str, Any]:
     """Draft one context item. Uses the execution_engine model when configured,
     otherwise falls back to the item excerpt (deterministic, offline). A model
@@ -568,6 +959,7 @@ def _draft_item(
         prompt,
         root=root,
         timeout=model_timeout_seconds,
+        _settings=model_settings,
     )
     if completion is not None:
         drafted["draft"] = completion["text"]
@@ -624,16 +1016,18 @@ def _history_targets(output_dir: Path, names: tuple[str, ...]) -> list[tuple[Pat
     """Plan collision-safe copies without creating history or changing artifacts."""
     tree_entries(output_dir)
     primary = file_path(output_dir / names[0])
+    incomplete = False
     if primary.exists():
         kind = "context_package" if names[0] == "context_package.json" else "execution_draft"
         try:
-            previous = read_validated(primary, kind)
+            previous, raw = read_validated_snapshot(primary, kind)
         except UnsafePathError:
             raise
         except (OSError, ValidationError):
-            pass  # Unreadable/invalid evidence must not be treated as an empty batch.
+            incomplete = kind == "execution_draft"
         else:
-            if not previous["items"] and not previous.get("blocked_inputs") and not previous.get("held_for_review"):
+            incomplete = kind == "execution_draft" and not _committed_execution_draft(output_dir, previous, raw)
+            if not incomplete and not previous["items"] and not previous.get("blocked_inputs") and not previous.get("held_for_review"):
                 return []
     history = directory_path(output_dir / "history")
     targets = []
@@ -642,10 +1036,11 @@ def _history_targets(output_dir: Path, names: tuple[str, ...]) -> list[tuple[Pat
         if not path.exists():
             continue
         stamp = int(path.stat().st_mtime)
-        target = history / f"{stamp}-{name}"
+        archive_name = f"{path.stem}.incomplete{path.suffix}" if incomplete else name
+        target = history / f"{stamp}-{archive_name}"
         suffix = 2
         while file_path(target).exists():
-            target = history / f"{stamp}-{suffix}-{name}"
+            target = history / f"{stamp}-{suffix}-{archive_name}"
             suffix += 1
         targets.append((path, target))
     return targets

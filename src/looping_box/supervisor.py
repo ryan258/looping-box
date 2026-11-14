@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import time
@@ -10,6 +11,8 @@ from typing import Any
 from ._util import (
     append_audit as _append_audit_event,
     default_root as _default_root,
+    inspect_audit_log,
+    preflight_audit as _preflight_audit,
     project_lock as _project_lock,
     rel as _rel,
     resolve_under_root as _resolve_under_root,
@@ -22,7 +25,13 @@ from .validation import validate_data
 from .paths import UnsafePathError, contained_path, directory_path, file_path, read_validated, tree_entries
 from .phase1 import _validated_sop
 from .review import list_reviews
-from .worker import _validate_existing_worker_artifacts, _validated_delta, execution_needs_run, run_worker
+from .worker import (
+    _delta_keeps_blocked_inputs,
+    _validate_existing_worker_artifacts,
+    _validated_delta,
+    execution_needs_run,
+    run_worker,
+)
 from .eligibility import SourceReingestRequired
 
 
@@ -64,12 +73,33 @@ def load_world_state(root: Path | str) -> dict[str, Any]:
     root_path = Path(root).resolve()
     state_path = _resolve_under_root(root_path, ".world_state.json")
     if not state_path.exists():
-        dependent = ["cache/supervisor/blocked.json"]
-        dependent.extend(f"cache/workers/{worker}/{name}" for worker in ("context_builder", "execution_engine")
-                         for name in ("state.json", "last_output.json"))
-        for reference in dependent:
-            if file_path(_resolve_under_root(root_path, reference)).exists():
-                raise ValueError(f"state_inconsistent: {state_path}: missing with dependent {reference}")
+        block = file_path(_resolve_under_root(root_path, "cache/supervisor/blocked.json"))
+        audit_path = _resolve_under_root(root_path, "logs/transactions/supervisor.jsonl")
+        audit = inspect_audit_log(audit_path)
+        if audit.broken_at is not None:
+            raise ValueError(f"audit_invalid: {audit_path}: line {audit.broken_at}: broken audit chain")
+        archive = directory_path(_resolve_under_root(root_path, "cache/deltas/archive"))
+        try:
+            archived_deltas = any(path.name.endswith(".json") for path in archive.iterdir())
+        except FileNotFoundError:
+            archived_deltas = False
+        if block.exists() or audit.events:
+            raise ValueError(f"state_inconsistent: {state_path}: missing with prior supervisor evidence")
+        # Legacy standalone workers predate initialization of world state. Allow
+        # their coherent artifacts only when there is no prior supervisor evidence.
+        for worker_id in ("context_builder", "execution_engine"):
+            _validate_existing_worker_artifacts(root_path, worker_id)
+            worker_dir = _resolve_under_root(root_path, f"cache/workers/{worker_id}")
+            marker = file_path(worker_dir / "state.json")
+            output_path = file_path(worker_dir / "last_output.json")
+            if archived_deltas and (marker.exists() or output_path.exists()):
+                raise ValueError(f"state_inconsistent: {state_path}: missing with prior supervisor evidence")
+            if marker.exists() and not output_path.exists():
+                raise ValueError(f"state_inconsistent: {state_path}: missing with incomplete {worker_id} evidence")
+            if output_path.exists():
+                output = read_validated(output_path, "worker_output", worker_id=worker_id)
+                if output["outputs"]["artifacts"] and not marker.exists():
+                    raise ValueError(f"state_inconsistent: {state_path}: missing with incomplete {worker_id} evidence")
         return _default_world_state()
     state = read_validated(state_path, "world_state")
     for worker_id in ("context_builder", "execution_engine"):
@@ -80,6 +110,13 @@ def load_world_state(root: Path | str) -> dict[str, Any]:
             raise ValueError(f"state_inconsistent: {state_path}: required worker output {output} is missing")
         read_validated(output, "worker_output", worker_id=worker_id)
     return state
+
+
+def _initialize_standalone_world(root: Path) -> None:
+    """Initialize the never-supervised baseline under the existing worker lock."""
+    path = file_path(_resolve_under_root(root, ".world_state.json"))
+    if not path.exists():
+        _write_json(path, load_world_state(root))
 
 
 _RESOURCE_LIMIT_REASONS = {"file_count_limit", "payload_size_limit", "worker_timeout"}
@@ -131,8 +168,11 @@ def _run_supervisor_locked(
     generated_at: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
+    _preflight_audit(root, "supervisor")
     state = load_world_state(root)
     list_reviews(root)  # Validate live evidence before resource checks or worker side effects.
+    state_path = file_path(_resolve_under_root(root, ".world_state.json"))
+    file_path(state_path.with_name(f"{state_path.name}.{os.getpid()}.tmp"))
     state["registered_loops"] = ["phase1"] + list(config["workers"])
     state["dependencies"] = list(config["dependencies"])
     delta_paths = _phase1_delta_paths(root)
@@ -152,6 +192,15 @@ def _run_supervisor_locked(
     new_delta_refs = [_rel(root, path) for path in new_deltas]
     changed_file_count = _changed_file_count(new_deltas)
     max_files = config["max_files_per_cycle"]
+    if state.get("last_run_at") is None and not state["runs"] and not state["recovery"]["last_error"]:
+        # A standalone worker can initialize the world without supervising a run.
+        # Record the first supervisor attempt before workers run or inputs are archived.
+        initial = {**state, "dirty": True, "recovery": {
+            **_clear_recovery(),
+            "last_error": "state_incomplete: the first supervisor pass has no recorded outcome. "
+                          "If the pass has stopped, resolve any storage error and run it again.",
+        }}
+        _write_json(state_path, initial)
     if changed_file_count > max_files:
         return _blocked(root, state, generated_at, "file_count_limit",
                         f"{changed_file_count} changed files exceeds limit {max_files}", new_delta_refs)
@@ -229,19 +278,23 @@ def _acknowledged_delta_refs(root: Path, paths: list[Path]) -> list[str]:
     if not context_path.exists():
         return []
     context = read_validated(context_path, "context_package")
-    retained = set(context["source_deltas"]) & _consumed_delta_refs(root)
+    retained = set(context["source_deltas"])
+    blocked_by_path = {item["relative_path"]: item for item in context["blocked_inputs"]}
+    consumed = _consumed_delta_refs(root)
     acknowledged = []
     for path in paths:
         reference = _rel(root, path)
-        if reference not in retained or not path.exists():
+        if reference not in consumed or not path.exists():
             continue
         try:
-            _validated_delta(_read_json(path), path)
+            delta = _validated_delta(_read_json(path), path)
         except UnsafePathError:
             raise
         except (OSError, ValueError, RecursionError):
             continue
-        acknowledged.append(reference)
+        # Skips and repeated holds can be consumed without replacing the context.
+        if reference in retained or _delta_keeps_blocked_inputs(delta, blocked_by_path):
+            acknowledged.append(reference)
     return acknowledged
 
 
@@ -257,8 +310,26 @@ def _finish_supervisor(root: Path, state: dict[str, Any], generated_at: str, sta
     state["runs"] = state["runs"][-50:]
     result = {"schema": "looping-box.supervisor.run.v1", "generated_at": generated_at, "status": status,
               "plan": list(plan), "worker_outputs": outputs, "recovery": recovery}
-    _append_audit(root, generated_at, result, source_deltas)
-    _write_json(_resolve_under_root(root, ".world_state.json"), state)
+    state_path = _resolve_under_root(root, ".world_state.json")
+    try:
+        _write_json(state_path, state)
+    except OSError as exc:
+        raise OSError(
+            f"state_incomplete: supervisor left local results in place. "
+            f"Resolve the state write error and retry: {exc}"
+        ) from exc
+    try:
+        _append_audit(root, generated_at, result, source_deltas)
+    except (OSError, ValueError) as exc:
+        message = f"audit_incomplete: supervisor left local results in place; inspect the supervisor audit log: {exc}"
+        state["dirty"] = True
+        state["recovery"] = {**recovery, "last_error": message}
+        state["runs"][-1]["status"] = "failed"
+        try:
+            _write_json(state_path, state)
+        except (OSError, ValueError) as state_error:
+            raise ValueError(f"{message}; could not save supervisor recovery: {state_error}") from state_error
+        raise ValueError(message) from exc
     return result
 
 
@@ -534,6 +605,7 @@ def _run_worker_with_runtime(
         worker_id,
         now=generated_at,
         model_timeout_seconds=model_timeout,
+        _supervised=True,
     )
     runtime_seconds = time.monotonic() - started
     output["runtime_seconds"] = round(runtime_seconds, 6)
