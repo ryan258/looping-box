@@ -18,13 +18,28 @@ send data to the configured HTTP(S) endpoint.
 - POSIX `flock` coordinates cooperating mutators. The persistent lock file's age
   cannot authorize stealing it. Read-only inspection and worker dry run do not
   create a lock or change workspace evidence.
-- Approval rechecks current source/policy and signs a record bound to the payload
-  hash. HMAC detects unsigned/edited records without the key. A terminal prompt
-  and explicit noninteractive override provide friction, not independent identity.
-- Audit hash chains detect many edits/reorderings. Append verifies the existing
-  chain and fails on corruption rather than repairing it silently.
+- Approval rechecks current source and policy. New approvals sign both the
+  payload and verifier digests. Existing signed records remain readable with
+  the evidence they originally bound. HMAC detects unsigned or edited records
+  without the key. The terminal prompt records interactive confirmation.
+- Audit hash chains detect many edits and reorderings. Append verifies the
+  existing chain. Diagnostics also compare retained, newly signed decisions
+  with the review log to identify missing events.
 - Atomic replacement preserves individual complete files. Artifacts precede
   successful-consumption markers; detected inconsistencies fail visibly.
+
+## OpenRouter example runs
+
+The numbered examples use synthetic inputs. With `--free`, the launcher uses
+the checkout's `.env` key and sends eligible excerpts to `openrouter/free` for
+the first draft. Context building, the review verifier, and the follow-up shell
+run offline. Held excerpts stay outside the draft-model input.
+
+The launcher saves draft snapshots and call metadata in the local Git-ignored
+`logs/openrouter-examples/` directory. `--runs` reads those records offline.
+The call log records the returned model, response identifier, and reported
+usage and cost when available. The workspace's hash-linked workflow audit
+records are kept in `logs/transactions/`. [Example guide](50-offline-examples.md#review-saved-free-runs)
 
 ## Accepted limitations
 

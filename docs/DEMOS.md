@@ -1,12 +1,31 @@
 # Local walkthroughs — 0.2.0
 
-Use a new temporary workspace for each experiment. These steps are examples,
-not acceptance results. They use an installed `looping-box`; install the checkout
-as described in [README](../README.md). Existing numbered and `demos/` shell
-scripts are optional historical examples, not required 0.2.0 acceptance gates.
-They have not been comprehensively revised by the bounded command/docs task.
+These walkthroughs use synthetic fixtures and fresh local workspaces. Choose a
+numbered example for a quick run, use the interactive walkthrough to follow a
+signed decision, or review a saved model draft.
+
+## Run a numbered example from the checkout
+
+Use supported Python to launch any of the 50 examples from the checkout. Run a
+configuration fixture, or open an offline shell to try the follow-up steps for
+a held item. [Example catalog](50-offline-examples.md)
+
+```sh
+python3.14 demos/examples.py 17
+python3.14 demos/examples.py 45 --shell
+```
+
+The launcher prints the workspace path, CLI result, and follow-up. The numbered
+scripts `./demo-1.sh` through `./demo-3.sh` and `./demos/run-all.sh` also create
+disposable workspaces with provider settings disabled. The sales walkthrough
+gives you a talk track for the three scripts. [Sales demos](sales-demos.md)
 
 ## A clean offline pass
+
+The interactive walkthrough uses an installed `looping-box` CLI.
+[Install from the checkout](../README.md#start-offline)
+
+### Set up the offline workspace
 
 Start an interactive Bash session first. Keep it open for all the steps below;
 `exit` at the end restores your previous environment.
@@ -26,7 +45,13 @@ export LOOPING_BOX_REVIEW_KEY=demo-key-not-a-secret
 export LOOPING_BOX_APPROVER=demo-operator
 export OPENROUTER_API_KEY= MODEL_CONTEXT_BUILDER= MODEL_EXECUTION_ENGINE= MODEL_VERIFIER=
 export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+unset LOOPING_BOX_ALLOW_NONINTERACTIVE
 looping-box init "$demo_root"
+```
+
+### Run the clean pass
+
+```sh
 printf '%s' 'Project docs: summarize the backlog.' > "$demo_root/inbox/notes.txt"
 looping-box run
 cat "$demo_root/cache/workers/execution_engine/draft.md"
@@ -57,16 +82,68 @@ looping-box run                    # exits 2: blocked by review
 looping-box review list            # exits 0: successful inspection
 ```
 
-Use the returned ID in `review show ID`. In a terminal, run
-`looping-box review approve ID --note 'Reviewed for local drafting'`, inspect the
-prompt, and type `approve` only if intended. Alternatively use
-`looping-box review reject ID --note 'Exclude from drafting'`. Then rerun `run`.
-Approval permits a local draft of the request; no deployment occurs.
+Replace `REVIEW_ID` with the returned ID and inspect the source before approving.
+
+```sh
+looping-box review show REVIEW_ID
+looping-box review approve REVIEW_ID --note 'Reviewed for local drafting'
+```
+
+Read the prompt and type `approve` to confirm the fixture decision. The
+transcript uses a sample review ID and workspace path.
+
+```text
+Approve review-3a3aada822f63534 [review_required: deploy]?
+Approval makes the item eligible for local drafting only.
+Type 'approve': approve
+approved: review-3a3aada822f63534
+Item approved for local drafting. With default ingestion settings, run this next.
+looping-box run --root /private/tmp/looping-box-demo
+For custom Phase 1 ingestion, repeat your input, SOP, and state settings and omit --delta-dir.
+Then run
+looping-box supervisor --once --root /private/tmp/looping-box-demo
+```
+
+Copy the `looping-box run --root ...` command from your terminal. After it
+finishes, open the draft and find `inbox/action.txt` and its approval reference.
+
+```sh
+cat "$demo_root/cache/workers/execution_engine/draft.md"
+```
+
+The approval records a signed decision for local drafting. Deployment happens
+separately in the operator's tools. To try a rejection in a fresh fixture, use
+`looping-box review reject REVIEW_ID --note 'Exclude from drafting'`.
 
 A source containing `Save the api key.` is blocked-class: approval additionally
 requires `--allow-blocked`. An edited source needs ingestion and fresh review;
 editing a staged payload is not a way to lower severity. When scripting, handle
 expected exit 2 explicitly instead of treating every nonzero exit as a crash.
+
+## Run or replay an OpenRouter example
+
+From the checkout, add `--free` to use its `.env` key with `openrouter/free` for
+the first draft. Example 22 sends the eligible interview summary and holds the
+source with the proposed named quotation. You can inspect the pending review
+locally. Any follow-up shell starts offline.
+
+```sh
+python3.14 demos/examples.py 22 --free
+```
+
+To replay the result or see which earlier runs are saved locally, use `--runs`.
+On a fresh checkout, the list can be empty. The second command opens the latest
+run for example 22 and prints its draft if one was saved.
+
+```sh
+python3.14 demos/examples.py --runs
+python3.14 demos/examples.py --runs 22
+```
+
+These commands read the Git-ignored `logs/openrouter-examples/` records locally.
+The log distinguishes a reported zero cost, unavailable cost, and a run that
+made no request. A draft snapshot preserves the first pass before follow-up
+edits. [Free model and run history guide](50-offline-examples.md#review-saved-free-runs)
 
 ## Remove or defuse a source deliberately
 

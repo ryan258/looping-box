@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Looping Box product overview</title>
+  <meta name="description" content="The Looping Box drafting workflow, with 50 runnable examples and local records of optional OpenRouter runs.">
+  <link rel="stylesheet" href="../assets/tokens.css">
+  <link rel="stylesheet" href="../preview/type.css">
+  <link rel="stylesheet" href="one-sheet.css">
+</head>
+<body>
+  <main class="sheet">
+    <header class="masthead">
+      <img src="../assets/looping-box-lockup.svg" width="170" alt="Looping Box">
+      <p>Product overview</p>
+    </header>
+
+    <p class="descriptor">Traceable drafts from local files</p>
+    <h1>Make a draft.<br>Keep the trail.</h1>
+    <p class="intro">Looping Box is a command-line tool for one operator. Run a pass on a folder of text files and get a working draft you can trace back to its sources.</p>
+
+    <section class="flow" aria-labelledby="flow">
+      <h2 id="flow">How a pass works</h2>
+      <dl>
+        <dt>Drop in local files</dt>
+        <dd>Put Markdown, text, or JSON files in the workspace inbox.</dd>
+        <dt>Read the draft</dt>
+        <dd>The default offline pass assembles short excerpts. Find source paths in the Markdown and provenance in the adjacent JSON.</dd>
+        <dt>Decide on held items</dt>
+        <dd>Configured wording such as “deploy” can hold a source. Signed approval makes it eligible for local drafting only. The CLI prints the next command.</dd>
+      </dl>
+    </section>
+
+    <aside class="callout">
+      <h2>Try 50 runnable examples</h2>
+      <p>Run an example offline or add <code>--free</code> to send eligible sample excerpts to OpenRouter’s free router for the first draft.</p>
+      <p>Use <code>python3.14 demos/examples.py --runs</code> to review local run records, with draft snapshots, models, and reported costs when available.</p>
+    </aside>
+
+    <footer class="footer">
+      <p><strong>Open the example guide</strong><br><code>docs/50-offline-examples.md</code> in the checkout</p>
+      <p><strong>Private 0.2.0 candidate</strong><br>Local macOS and Linux targets</p>
+    </footer>
+  </main>
+</body>
+</html>

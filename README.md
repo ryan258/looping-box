@@ -1,42 +1,97 @@
 # Looping Box
 
-Looping Box turns local inbox files into traceable drafts in one pass. Recognized
-outward-action language is held for review. The two workers build context and
-write drafts; neither executes instructions in source files or model responses.
-It runs offline by default, using the Python standard library.
+<img src="docs/brand/assets/app-icon.svg" width="32" height="32" alt=""> **Traceable drafts from local files**
 
-**0.2.0 is a local release candidate under acceptance, not a published or fully
-verified release.** Supported target: Python 3.9–3.14 on macOS or Linux, one
-operator, local disk. Windows and network filesystems are unsupported. See
+*Make a draft. Keep the trail.*
+
+Looping Box is a local drafting CLI. Put Markdown, text, or JSON files in a
+workspace inbox and run one pass. Open the saved Markdown draft to see the
+source paths, with provenance in the adjacent JSON. The default workflow runs
+offline and assembles short excerpts from your files.
+
+Files that match configured outward-action terms such as `deploy` or `send`
+are held for review. **Approved for drafting** means a signed decision makes
+that source eligible for a later local draft. Sending, publishing, and deploying
+happen separately in the operator's own tools.
+
+**0.2.0 is a private local release candidate under acceptance.** The target is
+Python 3.9–3.14 on macOS or Linux, with one operator and local disk. See
 [review status](REVIEW.md) for remaining acceptance work and
 [the threat model](docs/THREAT-MODEL.md) for limits.
 
+[Try a runnable example](docs/50-offline-examples.md) · [Walk through the demos](docs/sales-demos.md) · [Open the brand and marketing kit](docs/brand/README.md)
+
 ## Start offline
 
-From this checkout, install locally, then create a separate workspace:
+From this checkout, create a virtual environment with a supported Python
+version. This example uses Python 3.14 and starts a fresh workspace.
 
 ```sh
-python3 -m pip install .
-looping-box init ~/looping-workspace
-cd ~/looping-workspace
-printf '%s' 'Project docs: summarize the backlog.' > inbox/notes.txt
-looping-box run
-looping-box status
-looping-box doctor
-looping-box report
+python3.14 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+
+(
+  demo_root="$(mktemp -d)" || exit 1
+  export OPENROUTER_API_KEY= MODEL_CONTEXT_BUILDER= MODEL_EXECUTION_ENGINE= MODEL_VERIFIER=
+  export XDG_CONFIG_HOME="$demo_root/private-config"
+  unset OPENROUTER_BASE_URL LOOPING_BOX_REVIEW_KEY LOOPING_BOX_ALLOW_NONINTERACTIVE
+  looping-box init "$demo_root" || exit 1
+  printf '%s\n' 'Project docs: summarize the backlog.' > "$demo_root/inbox/notes.txt"
+  looping-box run --root "$demo_root" || exit 1
+  cat "$demo_root/cache/workers/execution_engine/draft.md" || exit 1
+  looping-box status --root "$demo_root"
+  looping-box doctor --root "$demo_root"
+  looping-box report --root "$demo_root"
+  printf '\nDemo workspace: %s\n' "$demo_root"
+)
 ```
 
-No key or model is needed for drafting offline. The resulting draft is
-`cache/workers/execution_engine/draft.md`, with provenance in the adjacent JSON.
-Offline drafts copy compacted source excerpts; they are not generated summaries.
-Read [the walkthrough](docs/DEMOS.md) for a clean, held, and removal example.
+The offline run needs no model or API key. The draft shows `inbox/notes.txt`
+and its compacted excerpt. The adjacent `draft.json` carries provenance. The
+walkthrough covers a clean pass, a held item, and a source removal.
+[Offline walkthrough](docs/DEMOS.md#a-clean-offline-pass)
 
-For source development, `python3 -m pip install -e .` is also supported. Without
-installation, the checkout's `./startday.sh` uses its `src/` package. A local wheel
-can be built with `python3 -m pip wheel --no-deps . --wheel-dir dist`, then installed
+Installation may fetch build tooling. The runtime uses the standard library.
+For source development, `python -m pip install -e .` in the virtual environment
+is also supported. The checkout's `./startday.sh` uses its `src/` package. A local
+wheel can be built with `python -m pip wheel --no-deps . --wheel-dir dist`, then installed
 by its filename. Default configuration and runtime schemas are package data;
 a checkout is not intended to be required after installation. Installed-wheel
 acceptance and the platform matrix remain separate verification gates.
+
+## Try an example from the checkout
+
+The 50 runnable examples each start with synthetic files in a fresh workspace.
+List the examples, run the zero-value configuration fixture, or open the review
+fixture in an offline follow-up shell. [Example catalog](docs/50-offline-examples.md)
+
+```sh
+python3.14 demos/examples.py
+python3.14 demos/examples.py 17
+python3.14 demos/examples.py 45 --shell
+```
+
+The example launcher runs offline by default. Add `--free` to use the existing
+OpenRouter key in the checkout's `.env`. For the first draft, the launcher
+sends eligible sample excerpts to `openrouter/free`. Review stays local, and
+the example shell starts offline. [Free model walkthrough](docs/50-offline-examples.md#try-a-free-openrouter-draft)
+
+```sh
+python3.14 demos/examples.py 22 --free
+```
+
+Each `--free` run records its outcome in the Git-ignored
+`logs/openrouter-examples/` folder. The record holds a snapshot of the draft and
+its provenance when they were saved, along with any returned model, token counts,
+and cost OpenRouter reports. The two `--runs` commands read local files, either
+listing saved runs or opening the latest run for the given example.
+[Saved runs guide](docs/50-offline-examples.md#review-saved-free-runs)
+
+```sh
+python3.14 demos/examples.py --runs
+python3.14 demos/examples.py --runs 22
+```
 
 ## Commands and roots
 
@@ -56,7 +111,7 @@ and `looping-box-review` entry points remain supported.
 | `worker execution_engine [--root R]` | Write drafts from eligible current context |
 | `review [--root R] list` | List current reviews |
 | `review [--root R] show ID` | Inspect one current review |
-| `review [--root R] approve ID --note TEXT` | Confirm a signed release into drafting |
+| `review [--root R] approve ID --note TEXT` | Record signed approval for drafting |
 | `review [--root R] reject ID --note TEXT` | Record a signed rejection |
 | `review [--root R] key` / `audit` | Inspect key usability / audit chains |
 | `doctor [--root R]` | Read-only local checks and remedies |
@@ -76,6 +131,9 @@ source and performs `run`. For review, put the root **before** the subcommand:
 `run` and `startday.sh` reject `--input-dir`, `--sop`, `--state`, `--delta-dir`,
 and `--staging-dir` with usage exit 2 before work. Those flags remain available
 on `phase1` only, with paths contained under the selected root.
+Use `supervisor --once` after ingesting with a custom SOP. Review and workers
+check the current selected SOP before using its excerpts. The workspace's
+gate keywords and smaller input byte limit still apply.
 
 | Operation | 0 | 1 | 2 |
 |---|---|---|---|
@@ -128,24 +186,48 @@ even if all entries are skipped. Removing a previously tracked source emits a
 removal-only delta; a later empty scan with no removals writes state but no delta.
 Latest held or removed entries suppress older queued content. Workers recheck
 source/policy freshness and preserve undrafted eligible carry-over.
+If a newer scan supersedes saved context, rebuild it before running execution
+directly. A scan that only confirms unchanged work keeps the current draft in
+place.
 
 ## Reviews and optional models
+
+**Approved for drafting.** Inspect the pending item and choose one decision.
+Replace `REVIEW_ID` with the ID from the list.
 
 ```sh
 looping-box review list
 looping-box review show REVIEW_ID
 looping-box review approve REVIEW_ID --note 'Reviewed for local drafting'
-# Or decline the item:
-looping-box review reject REVIEW_ID --note 'Do not include this source'
-looping-box run
 ```
 
-Approval normally requires a terminal and typing `approve`. Notes must be
-nonblank. `blocked` requires `--allow-blocked`; `forbidden` cannot be approved.
-Approval rechecks current source and policy, and signs a record bound to the
-review payload hash. It permits local drafting, not the action described by the
-input. Already processed bytes are not forcibly redrafted by a later approval;
-editing bytes creates a new identity. General exactly-once delivery is not promised.
+Read the prompt, then type `approve` to confirm. This example uses a sample
+review ID and workspace path.
+
+```text
+Approve review-3a3aada822f63534 [review_required: deploy]?
+Approval makes the item eligible for local drafting only.
+Type 'approve': approve
+approved: review-3a3aada822f63534
+Item approved for local drafting. With default ingestion settings, run this next.
+looping-box run --root /private/tmp/looping-box-demo
+For custom Phase 1 ingestion, repeat your input, SOP, and state settings and omit --delta-dir.
+Then run
+looping-box supervisor --once --root /private/tmp/looping-box-demo
+```
+
+With default ingestion settings, copy the `looping-box run --root ...` command
+from your own terminal. It includes the workspace you approved in. The
+[interactive offline walkthrough](docs/DEMOS.md#a-held-item-with-a-real-human-decision)
+shows how to check the resulting draft.
+
+To reject the item, use `looping-box review reject REVIEW_ID --note 'Do not include this source'`.
+Approval normally requires an interactive terminal. Notes must be nonblank.
+`blocked` requires `--allow-blocked`; `forbidden` cannot be approved.
+Approval rechecks current source and policy. New approvals bind the signed
+record to both the review payload and the verifier result. A fresh approval can
+resume a previously released item that had yet to draft. Previously drafted bytes
+stay deduplicated, and edited bytes have a new identity.
 
 The signing key is `LOOPING_BOX_REVIEW_KEY`, or
 `${XDG_CONFIG_HOME:-~/.config}/looping-box/review.key`; a missing file is created
@@ -155,17 +237,22 @@ key files are refused. `review key` does not print key bytes. Attribution uses
 `LOOPING_BOX_ALLOW_NONINTERACTIVE` accepts only trimmed, case-insensitive
 `1`, `true`, `yes`, or `on`; use deliberately, because it bypasses terminal friction.
 
-Copy `.env.example` to `.env` only if using optional models, and make it private
-with `chmod 600 .env`. The example key and all three model IDs are blank. A role
-needs both `OPENROUTER_API_KEY` and its ID (`MODEL_CONTEXT_BUILDER`,
+### Configure models in your own workspace
+
+To enable a model role in a workspace, copy its `.env.example` to `.env` and
+set private permissions with `chmod 600 .env`. The example key and all three
+model IDs are blank. A role needs both `OPENROUTER_API_KEY` and its ID (`MODEL_CONTEXT_BUILDER`,
 `MODEL_EXECUTION_ENGINE`, or `MODEL_VERIFIER`). The default endpoint is
-`https://openrouter.ai/api/v1`; a configured base URL must use HTTP(S).
-Process values override `.env`; only `OPENROUTER_*` and `MODEL_*` load from that
-file, once per resolved root per process. Changes to the configured execution-model ID invalidate execution work;
+`https://openrouter.ai/api/v1`. A configured base URL must use HTTP(S) with
+a host and optional path.
+Process values override `.env`, including an explicitly empty value. Only
+`OPENROUTER_*` and `MODEL_*` load from that file, once per resolved root per
+process. Workspace values stay scoped to that root. Changes to the configured execution-model ID invalidate execution work;
 context-builder/verifier model changes and key changes alone do not.
 
 Enabled roles send excerpts/context or review content to the configured endpoint.
-There is no automatic secret redaction. Provider requests may incur charges.
+Provider redirects and responses containing the configured API key are rejected.
+Prompts may contain unredacted source excerpts. Provider requests may incur charges.
 The optional verifier is advisory and can add a block; it cannot override failed
 deterministic checks. Prompts are not a complete injection defense.
 
@@ -194,7 +281,6 @@ ruff check src tests
 python3 -m unittest discover -s tests -p 'test_package_acceptance.py'
 ```
 
-These commands confirm local offline acceptance. They do not establish full platform-matrix,
-live-provider, draft-quality, or published release status. See [REVIEW.md](REVIEW.md)
-and [ROADMAP.md](ROADMAP.md). Publication and a license decision are separate owner
-actions, not requirements for this private local candidate.
+Use these commands to check local offline behavior. The review status records
+the acceptance evidence and remaining platform and release work. Publication
+and the license decision are owner actions. [Review status](REVIEW.md) · [Roadmap](ROADMAP.md)

@@ -1,0 +1,28 @@
+:root {
+  --lb-paper: #F5F1E8;
+  --lb-ink: #182938;
+  --lb-cobalt: #174DC4;
+  --lb-white: #FFFFFF;
+  --lb-muted: #53646D;
+  --lb-blue-wash: #E9EFFD;
+  --lb-dark-muted: #B8C6CC;
+  --lb-amber: #774809;
+  --lb-amber-wash: #FFEDC7;
+  --lb-moss: #34551E;
+  --lb-moss-wash: #E3EBCF;
+  --lb-rust: #922F38;
+  --lb-rose-wash: #F8E3E3;
+
+  --lb-font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --lb-font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+
+  --lb-space-1: 0.25rem;
+  --lb-space-2: 0.5rem;
+  --lb-space-3: 0.75rem;
+  --lb-space-4: 1rem;
+  --lb-space-6: 1.5rem;
+  --lb-space-8: 2rem;
+  --lb-space-12: 3rem;
+  --lb-space-16: 4rem;
+  --lb-radius: 0.5rem;
+}

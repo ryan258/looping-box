@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Looping Box · Traceable drafts from local files</title>
+  <meta name="description" content="Turn local text files into drafts you can trace. Try 50 runnable examples offline or use OpenRouter's free models for the first draft.">
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/tokens.css">
+  <link rel="stylesheet" href="type.css">
+  <link rel="stylesheet" href="preview.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header shell">
+    <a class="home" href="#content" aria-label="Looping Box home">
+      <img src="../assets/looping-box-lockup.svg" alt="" width="176" height="42">
+    </a>
+    <nav aria-label="Page">
+      <a href="#workflow">How it works</a>
+      <a href="#walkthrough">Examples</a>
+    </nav>
+  </header>
+  <main id="content">
+    <section class="hero shell" aria-labelledby="headline">
+      <div class="hero-copy">
+        <p class="descriptor">Traceable drafts from local files</p>
+        <h1 id="headline">Make a draft.<br>Keep the trail.</h1>
+        <p class="lede">Turn a folder of text files into a working draft. See where the material came from and which items need your review.</p>
+        <a class="button" href="#walkthrough">Browse 50 examples <span aria-hidden="true">↘</span></a>
+        <p class="candidate">Private 0.2.0 candidate · macOS and Linux</p>
+      </div>
+      <figure class="evidence">
+        <figcaption>What one offline pass leaves</figcaption>
+        <div class="evidence-row">
+          <p class="row-label">Source file</p>
+          <p class="filename"><code>inbox/notes.txt</code></p>
+          <p>Project docs: summarize the backlog.</p>
+        </div>
+        <div class="evidence-arrow" aria-hidden="true">↓</div>
+        <div class="evidence-row draft">
+          <p class="row-label">Draft saved</p>
+          <p class="filename"><code>draft.md</code></p>
+          <p>Project docs: summarize the backlog.</p>
+          <p class="evidence-note">The draft names the source. The adjacent <code>draft.json</code> carries provenance.</p>
+        </div>
+        <p class="example-note">Example from the offline walkthrough.</p>
+      </figure>
+    </section>
+
+    <section id="workflow" class="workflow">
+      <div class="shell">
+        <h2>From inbox to working draft</h2>
+        <ol class="steps">
+          <li>
+            <h3>Drop in your notes</h3>
+            <p>Use Markdown, text, or JSON files in a local workspace inbox.</p>
+          </li>
+          <li>
+            <h3>Run one pass</h3>
+            <p>Eligible work produces a draft and evidence you can inspect. In offline mode the draft assembles source excerpts.</p>
+          </li>
+          <li>
+            <h3>Review a held source</h3>
+            <p>If wording such as “deploy” matches a configured term, inspect the held item and decide whether it can enter drafting.</p>
+          </li>
+        </ol>
+        <aside class="review">
+          <strong>Approved for local drafting</strong>
+          <p>A signed approval makes the source eligible for a later draft. Looping Box prints the next command for that workspace. Sending, publishing, and deploying stay in your own workflow.</p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="walkthrough" class="walkthrough shell" aria-labelledby="try">
+      <div>
+        <h2 id="try">Find an example that fits your work</h2>
+        <p>Pick from 50 runnable examples across software, writing, creative work, and recovery. Each starts with sample files in its own workspace.</p>
+        <div class="walkthrough-actions">
+          <a class="button" href="../../50-offline-examples.md">Open the example guide <span aria-hidden="true">↗</span></a>
+          <a href="../../DEMOS.md">Try the offline walkthrough</a>
+        </div>
+      </div>
+      <div class="details">
+        <h3>Offline by default</h3>
+        <p>The default pass builds excerpts without an API key. Add <code>--free</code> to send eligible sample excerpts to OpenRouter’s free router for the first draft.</p>
+        <h3>Review saved free runs</h3>
+        <p class="command"><code>python3.14 demos/examples.py --runs</code></p>
+        <p>See local run records with draft snapshots, returned model names, and reported costs when available.</p>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <div class="shell">
+      <img src="../assets/looping-box-lockup-reverse.svg" alt="Looping Box" width="156" height="38">
+      <a href="../README.md">Brand and marketing kit</a>
+      <a href="../../../README.md">Candidate setup details</a>
+    </div>
+  </footer>
+</body>
+</html>

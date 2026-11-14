@@ -13,10 +13,14 @@ Local, stdlib-only Python loop: `inbox/` → phase1 (hash-dedup, keyword gate) �
 - Approvals are a human act: do not run `looping-box-review approve` on the user's behalf.
 - Do not stage, commit, or push unless the user names that action.
 
+## Source change checks
+
+Trace affected imports, callers, routes, templates, and focused tests with native repository searches and source reads before editing. Keep unresolved references explicit and follow Ryan's current verification instructions. Staging, commits, pushes, deployment, and publication require his explicit delegation of that action.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **looping-box** (528 symbols, 1107 relationships, 38 execution flows).
+This project is indexed by GitNexus as **looping-box** (1318 symbols, 3652 relationships, 101 execution flows).
 
 > Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 

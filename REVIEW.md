@@ -21,6 +21,24 @@ missing schema families, and a test-only validator are superseded by those
 changes. They should not remain on a future-feature list. Resource budget checks
 still happen after worker return; that is an accepted limit, not a hard deadline.
 
+## Current checkout demonstrations
+
+Focused local checks on November 12, 2026 used Python 3.14.9 on arm64 macOS
+with working-tree changes on top of `e6d165d`.
+
+- All 50 numbered fixtures matched their expected first offline pass. The ten
+  recovery and evidence follow-ups were exercised locally. [Examples](docs/50-offline-examples.md)
+- A local pseudo-terminal check exercised the approval prompt, signed decision,
+  and printed next command. Default and custom ingestion follow-ups were
+  checked with synthetic sources. [Interactive walkthrough](docs/DEMOS.md#a-held-item-with-a-real-human-decision)
+- Three live `openrouter/free` examples produced saved drafts with zero reported
+  cost. The later automatic example logger was exercised with simulated
+  provider responses, including success, failure, missing cost, and a held-only
+  run. [Recorded OpenRouter examples](docs/brand/collateral/openrouter-example-transcript.md)
+
+These results apply to the listed workflows and environment. The release gates
+below remain tracked separately.
+
 ## Remaining acceptance work
 
 T10's focused CLI/scaffold results were supplied as successful. T11 added the
@@ -70,7 +88,8 @@ network-filesystem, or distributed support is claimed. See the complete
 
 ## Owner decisions and deferred proposals
 
-License and public distribution are optional owner decisions. The broader idea
-catalog, sales-oriented material, and old demos are exploratory/historical, not
-part of 0.2.0 acceptance or a commercial requirement. Future enhancements are
-listed in [ROADMAP.md](ROADMAP.md); none expand this bounded implementation task.
+License and public distribution are optional owner decisions. The current
+[sales walkthrough](docs/sales-demos.md) and [brand kit](docs/brand/README.md)
+describe the private candidate and its demonstrations. The earlier idea catalog
+records exploratory proposals. Future enhancements have their own scope in
+[ROADMAP.md](ROADMAP.md).

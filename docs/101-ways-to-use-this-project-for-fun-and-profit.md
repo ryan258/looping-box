@@ -1,28 +1,25 @@
 # 101 Ways to Use Looping Box for Fun and Profit
 
-Looping Box does a small thing on purpose: files go into `inbox/`, anything that
-reads like an outward action is **held for a signed human decision**, everything else
-becomes a local draft, and every step lands in a hash-chained log. Nothing is ever sent,
-deployed, or committed by it.
-
-Every idea below is built from that, and only that.
+**Archived idea catalog.** This is the original brainstorm. Its tags reflect the
+ideas at the time they were written. Start with the [50 runnable examples](50-offline-examples.md)
+and the [current walkthrough](DEMOS.md) for the private 0.2.0 candidate.
 
 ## Reality check (read this first)
 
-- **The gate is a keyword tripwire, not a guarantee.** It misses paraphrase and other
-  languages. See [THREAT-MODEL.md](THREAT-MODEL.md). Do not sell it as security.
-- **Approving does not do the thing.** There are no executors yet. "Approved" means
-  "released into the local draft pipeline"; you still perform the action yourself.
-- **Offline, a draft is a 500-character excerpt copy.** The drafting gets interesting
-  only with a model enabled, and then excerpts go to OpenRouter.
-- **The "profit" section is unvalidated.** Nobody has paid for any of it. Treat each item
-  as a hypothesis to test with one real person before building anything.
+- **The gate uses configured keywords.** Paraphrases can pass and incidental
+  matches can hold a source. [Threat model](THREAT-MODEL.md)
+- **Approval makes a source eligible for local drafting.** Actions such as
+  sending or deploying happen in the operator's own tools.
+- **The offline draft uses source excerpts.** The default limit is 500 characters
+  per file. Enabled model roles send included data to the configured endpoint.
+- **The service ideas are hypotheses.** The project's operating model is a
+  private local tool for one operator.
 
-Tags: **[today]** works as shipped. **[model]** needs `OPENROUTER_API_KEY` and a
-`MODEL_<ROLE>` (excerpts leave your machine). **[roadmap]** needs an item from
-[ROADMAP.md](../ROADMAP.md). **[you do]** the tool holds or records; a human acts.
+Original tags include **[today]** for capabilities assumed at the time,
+**[model]** for optional provider use, **[roadmap]** for proposals, and
+**[you do]** for a step the operator performs.
 
-Adding a gate keyword means editing both `config/sops/phase1_ingestion.md` and
+Adding a gate keyword means editing both `config/sops/phase1_ingestion.json` and
 `config/action_classes.json`; `looping-box doctor` warns if they disagree.
 
 ---
@@ -105,7 +102,7 @@ Adding a gate keyword means editing both `config/sops/phase1_ingestion.md` and
 59. **Data-request queue.** "Delete my data" requests hold until a person confirms. **[today] [you do]**
 60. **Slack-thread triage.** Export threads as `.txt`; asks to `merge`, `upload`, or `deploy` surface. **[today]**
 61. **Air-gapped workflow.** No dependencies, no network by default; it runs on a laptop with Wi-Fi off. **[today]**
-62. **Throwaway workspaces.** The demo scripts build and delete one; copy that pattern for experiments. **[today]**
+62. **Throwaway workspaces.** The demo scripts create and print one for inspection. **[today]**
 63. **Release checklist enforcer.** Items shaped like `push`, `publish`, `deploy` become a human checklist. **[today] [you do]**
 64. **Approval-released `git_commit` / `file_move`.** One action per approved review, run exactly once, logged. **[roadmap]**
 
