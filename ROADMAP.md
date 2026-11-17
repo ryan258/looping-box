@@ -8,7 +8,7 @@ that the release is complete, hardened against every threat, or published.
 ## Current contract status (0.2.0 local candidate)
 
 1. T10 command/scaffold changes have recorded focused acceptance.
-2. T11 has a recorded macOS run with 301 offline tests (`OK, skipped=1`), two passing isolated installed-wheel checks, and clean Ruff output. The current expanded test suite passes 379 offline tests (`OK, skipped=1`) on Python 3.14. The results apply to the recorded tree and environment.
+2. T11 has a recorded macOS run with 301 offline tests (`OK, skipped=1`), two passing isolated installed-wheel checks, and clean Ruff output. On November 17, 2026 the expanded suite passed 382 offline tests (`OK, skipped=1`) on Python 3.15.0 (macOS). The results apply to the recorded tree and environment.
 3. T12 evidence and operator handoff recorded in [acceptance-results.md](acceptance-results.md) and [REVIEW.md](REVIEW.md); unresolved platform matrix/CI runs and owner publication decisions remain unverified.
 
 Kernel locking, runtime schemas, source snapshot consistency, contained access,

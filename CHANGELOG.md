@@ -29,7 +29,7 @@ is claimed.
 
 ### Commands, packaging, and documentation
 
-- Set package version to 0.2.0 and declare Python 3.9–3.14, Linux/macOS support.
+- Set package version to 0.2.0 and declare Python 3.9–3.15, Linux/macOS support.
   Bundle schemas alongside workspace defaults with no runtime dependencies.
 - Preserve umbrella, module, and four legacy console entry points. Resolve roots
   using explicit flag, environment, then cwd; init uses positional DIR/cwd and

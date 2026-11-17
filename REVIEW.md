@@ -66,8 +66,12 @@ suite was then executed on Python 3.14.7 (`macOS-27.0.1-arm64-arm-64bit-Mach-O`)
 outside the checkout verified the built wheel with `LOOPING_BOX_TEST_CLI`:
 **2 tests in 2.007s, OK, exit 0**. Repository-wide Ruff checks passed with exit 0.
 
-GitHub Actions platform-matrix runs (Ubuntu 3.9/3.12/3.14, macOS 3.12) and the
-manual real-terminal approval procedure remain operator/CI verifications.
+GitHub Actions run 43630934835 (November 14, 2026, `f8ea92d`) passed lint and the
+Ubuntu 3.12/3.14 and macOS 3.12 jobs. The Ubuntu 3.9 job failed at interpreter setup
+because `ubuntu-latest` (Ubuntu 26.04) no longer provides 3.9; the workflow now pins
+3.9 to `ubuntu-24.04` and adds 3.15. A local run on November 17, 2026 passed
+**382 tests in 99.820s, OK (skipped=1)** on Python 3.15.0 (macOS). The updated matrix
+and the manual real-terminal approval procedure remain operator/CI verifications.
 Exact Python/OS versions and wheel identity accompany the local results. No live
 provider call or draft-quality certification is required or implied by local acceptance.
 

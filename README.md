@@ -15,7 +15,7 @@ that source eligible for a later local draft. Sending, publishing, and deploying
 happen separately in the operator's own tools.
 
 **0.2.0 is a private local release candidate under acceptance.** The target is
-Python 3.9–3.14 on macOS or Linux, with one operator and local disk. See
+Python 3.9–3.15 on macOS or Linux, with one operator and local disk. See
 [review status](REVIEW.md) for remaining acceptance work and
 [the threat model](docs/THREAT-MODEL.md) for limits.
 
@@ -284,3 +284,11 @@ python3 -m unittest discover -s tests -p 'test_package_acceptance.py'
 Use these commands to check local offline behavior. The review status records
 the acceptance evidence and remaining platform and release work. Publication
 and the license decision are owner actions. [Review status](REVIEW.md) · [Roadmap](ROADMAP.md)
+
+## Owner lab launcher
+
+In the owner's local lab, `./box` is one entry point for three tools: `./box draft ...` runs
+Looping Box from this checkout, `./box build ...` runs the sibling AOP test-first builder in the
+current directory, and `./box crew ...` runs the sibling Ming orchestrator from its own checkout.
+Arguments and exit codes pass through. The siblings are found at `../sssf` and `../ming`, or
+through `AOP_HOME` and `MING_HOME`; other checkouts can ignore this script.

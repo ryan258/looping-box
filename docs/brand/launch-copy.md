@@ -43,7 +43,7 @@ Browse 50 runnable examples
 The default workflow runs offline and assembles excerpts. The example launcher's optional `--free` mode sends eligible synthetic excerpts to OpenRouter's free router for the initial draft. The saved run shows the draft, model, and cost when reported. Separately configured model roles can send unredacted prompt data to their configured endpoints and incur provider charges.
 
 **Availability note**  
-Version 0.2.0 is a local candidate for one operator on macOS or Linux with Python 3.9–3.14. Full platform verification is pending.
+Version 0.2.0 is a local candidate for one operator on macOS or Linux with Python 3.9–3.15. Full platform verification is pending.
 
 For an authorized public page, verify that the destinations are accessible to the audience. [Offline walkthrough](../DEMOS.md#a-clean-offline-pass) · [50 runnable examples](../50-offline-examples.md) · [Review behavior](../../README.md#reviews-and-optional-models)
 
