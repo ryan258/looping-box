@@ -468,11 +468,6 @@ def _decode_bytes(data: bytes) -> str:
     return text.replace("\x00", "")
 
 
-def _read_text(path: Path) -> str:
-    """Compatibility helper; ingestion decodes only its bounded snapshot."""
-    return _decode_bytes(_file_path(path).read_bytes())
-
-
 def _gate_text(path: Path, text: str) -> str:
     """Text the keyword gate sees: the raw text, plus (for .json) the decoded string
     values, so `\\u0064eploy` in a JSON file reads as "deploy"."""

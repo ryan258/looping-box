@@ -292,10 +292,6 @@ def decision_state(staging_dir: Path, review_id: str) -> tuple[str | None, bool]
     return None, present
 
 
-def decision_for(staging_dir: Path, review_id: str) -> str | None:
-    return decision_state(staging_dir, review_id)[0]
-
-
 def signed_rejections(
     staging_dir: Path, source_hashes: dict[str, str],
 ) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
@@ -328,10 +324,6 @@ def signed_rejections(
         if (source_hashes.get(item["relative_path"]) == item["sha256"]
                 and decision_state(staging_dir, review_id)[0] == "rejected"):
             yield record, payload
-
-
-def decision_record_exists(staging_dir: Path, review_id: str) -> bool:
-    return decision_for(staging_dir, review_id) is not None
 
 
 # --- audit log (append-only, hash-chained) -----------------------------------
@@ -512,10 +504,6 @@ def project_lock(
 
 def acquire_lock(lock_path: Path, generated_at: str, stale_lock_seconds: int) -> None:
     # Deprecated compatibility argument: timestamps never confer ownership.
-    _write_lock_exclusive(lock_path, generated_at)
-
-
-def _write_lock_exclusive(lock_path: Path, generated_at: str) -> None:
     locking.acquire(lock_path, generated_at)
 
 
