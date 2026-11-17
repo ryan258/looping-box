@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# One entry point for the agent lab:
+#   ./box draft ...   Looping Box from this checkout (python3 -m looping_box)
+#   ./box build ...   AOP test-first builder (../sssf/aop.py), run in the current directory
+#   ./box crew ...    Ming orchestrator (../ming/run.sh), run from its own checkout
+# ponytail: build and crew forward to sibling checkouts; arguments and exit codes pass through.
+# Port code in only when two of these need the same module at runtime.
+set -eu
+root="$(cd "$(dirname "$0")" && pwd)"
+mode="${1:-help}"
+[ $# -gt 0 ] && shift
+need() { [ -e "$1" ] || { echo "./box $mode needs $1. Set $2 to the checkout." >&2; exit 2; }; }
+case "$mode" in
+  draft) PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m looping_box "$@" ;;
+  build) home="${AOP_HOME:-$root/../sssf}"; need "$home/aop.py" AOP_HOME; exec python3 "$home/aop.py" "$@" ;;
+  crew) home="${MING_HOME:-$root/../ming}"; need "$home/run.sh" MING_HOME; exec "$home/run.sh" "$@" ;;
+  help|-h|--help) sed -n '2,5p' "$0" | cut -c3- ;;
+  *) echo "Usage: ./box draft|build|crew [args...]" >&2; exit 2 ;;
+esac
