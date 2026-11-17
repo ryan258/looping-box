@@ -343,7 +343,7 @@ class CommandAcceptanceTests(unittest.TestCase):
     def test_package_metadata_template_parity_and_resources_without_source_directory(self):
         metadata = (ROOT / "pyproject.toml").read_text()
         self.assertIn('version = "0.2.0"', metadata)
-        self.assertIn('requires-python = ">=3.9,<3.15"', metadata)
+        self.assertIn('requires-python = ">=3.9,<3.16"', metadata)
         self.assertIn('"templates/schemas/*.json"', metadata)
         self.assertEqual((ROOT / ".env.example").read_bytes(),
                          (ROOT / "src/looping_box/templates/env.example").read_bytes())
